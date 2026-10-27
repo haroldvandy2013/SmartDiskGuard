@@ -23,4 +23,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: SmartDiskGuard-macOS-DMG
-          path: dist/智能外接盘管家_安装包.dmg
+          path: dist/智能外接硬盘管家_安装包.dmg

@@ -2,7 +2,7 @@
 set -e
 
 BUILD_DIR="dist"
-APP_NAME="智能外接盘管家.app"
+APP_NAME="智能外接硬盘管家.app"
 APP_DIR="$BUILD_DIR/$APP_NAME"
 
 rm -rf "$BUILD_DIR"
@@ -18,9 +18,9 @@ cat << 'PLIST_EOF' > "$APP_DIR/Contents/Info.plist"
     <key>CFBundleIdentifier</key>
     <string>com.apple-silicon.SmartDiskGuard</string>
     <key>CFBundleName</key>
-    <string>智能外接盘管家</string>
+    <string>智能外接硬盘管家</string>
     <key>CFBundleDisplayName</key>
-    <string>智能外接盘管家</string>
+    <string>智能外接硬盘管家</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>

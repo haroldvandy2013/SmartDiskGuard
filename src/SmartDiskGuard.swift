@@ -23,7 +23,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.center()
-        window.title = "智能外接盘管家 (SmartDiskGuard)"
+        window.title = "智能外接硬盘管家 (SmartDiskGuard)"
         window.isReleasedWhenClosed = false
 
         let contentView = NSView(frame: rect)

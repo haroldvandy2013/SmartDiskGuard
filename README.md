@@ -1,11 +1,11 @@
-# 智能外接盘管家 (SmartDiskGuard)
+# 智能外接硬盘管家 (SmartDiskGuard)
 
 ![Platform](https://img.shields.io/badge/Platform-macOS%2012.0%2B-blue)
 ![Architecture](https://img.shields.io/badge/Architecture-Apple%20Silicon%20%7C%20Universal-success)
 ![Language](https://img.shields.io/badge/Language-Swift%205-orange)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
-**智能外接盘管家 (SmartDiskGuard)** 是一款极简、零后台轮询开销的 macOS 原生外接存储挂载/卸载（Mount / Unmount）管理工具。
+**智能外接硬盘管家 (SmartDiskGuard)** 是一款极简、零后台轮询开销的 macOS 原生外接存储挂载/卸载（Mount / Unmount）管理工具。
 
 专为连接机械硬盘、移动固态硬盘或扩展坞的 Mac 用户打造，彻底解决**外接硬盘长期挂载引发的 macOS 系统休眠唤醒 I/O 死锁（Dock 应用无限跳动无法打开）、Spotlight 后台频繁唤醒读写、盘体发热与寿命损耗**等痛点。
 
@@ -57,7 +57,7 @@ chmod +x build.sh package_dmg.sh
 ./build.sh
 ```
 
-编译完成后，生成的应用位于 `dist/智能外接盘管家.app`，可直接将其拖入 `/Applications`（应用程序）目录使用。
+编译完成后，生成的应用位于 `dist/智能外接硬盘管家.app`，可直接将其拖入 `/Applications`（应用程序）目录使用。
 
 ### 2. 打包生成 `.dmg` 分发安装镜像
 
@@ -67,7 +67,7 @@ chmod +x build.sh package_dmg.sh
 ./package_dmg.sh
 ```
 
-脚本会自动在 `dist/` 目录下生成 **`dist/智能外接盘管家_安装包.dmg`**，内含应用本体、`Applications` 拖拽快捷方式以及首次打开解除 Gatekeeper 隔离的辅助脚本。
+脚本会自动在 `dist/` 目录下生成 **`dist/智能外接硬盘管家_安装包.dmg`**，内含应用本体、`Applications` 拖拽快捷方式以及首次打开解除 Gatekeeper 隔离的辅助脚本。
 
 ---
 
@@ -79,7 +79,7 @@ chmod +x build.sh package_dmg.sh
 2. **首次打开未公证提示**：
    - 如从 Release 下载直接运行提示“无法验证开发者”，可在终端执行：
      ```bash
-     xattr -cr "/Applications/智能外接盘管家.app"
+     xattr -cr "/Applications/智能外接硬盘管家.app"
      ```
 
 ---
