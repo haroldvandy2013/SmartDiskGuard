@@ -41,12 +41,12 @@ cat << 'PLIST_EOF' > "$APP_DIR/Contents/Info.plist"
 PLIST_EOF
 
 echo "🔨 正在编译 Apple Silicon (arm64) + Intel (x86_64) 通用主程序..."
-if /usr/bin/swiftc -target arm64-apple-macos12.0 src/SmartDiskGuard.swift -o /tmp/SmartDiskGuard_arm64 2>/dev/null && \
-   /usr/bin/swiftc -target x86_64-apple-macos12.0 src/SmartDiskGuard.swift -o /tmp/SmartDiskGuard_x86_64 2>/dev/null; then
+if /usr/bin/swiftc -target arm64-apple-macos12.0 src/*.swift -o /tmp/SmartDiskGuard_arm64 && \
+   /usr/bin/swiftc -target x86_64-apple-macos12.0 src/*.swift -o /tmp/SmartDiskGuard_x86_64; then
     /usr/bin/lipo -create -output "$APP_DIR/Contents/MacOS/SmartDiskGuard" /tmp/SmartDiskGuard_arm64 /tmp/SmartDiskGuard_x86_64
     rm -f /tmp/SmartDiskGuard_arm64 /tmp/SmartDiskGuard_x86_64
 else
-    /usr/bin/arch -arm64 /usr/bin/swiftc src/SmartDiskGuard.swift -o "$APP_DIR/Contents/MacOS/SmartDiskGuard"
+    /usr/bin/arch -arm64 /usr/bin/swiftc src/*.swift -o "$APP_DIR/Contents/MacOS/SmartDiskGuard"
 fi
 
 echo "🎨 正在渲染应用高清圆角图标..."

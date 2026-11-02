@@ -6,6 +6,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var statusLabel: NSTextField!
     var autoUnmountCheckbox: NSButton!
     var logLabel: NSTextField!
+    var mountButton: NSButton!
+    var unmountButton: NSButton!
+    var diskOperationInProgress = false
+    var screenLocked = false
+    var displayAsleep = false
     
     struct ExternalVolume {
         let id: String
@@ -57,6 +62,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         mountBtn.font = NSFont.boldSystemFont(ofSize: 13)
         mountBtn.target = self
         mountBtn.action = #selector(mountSelected)
+        mountButton = mountBtn
         contentView.addSubview(mountBtn)
 
         let unmountBtn = NSButton(frame: NSRect(x: 230, y: 86, width: 186, height: 38))
@@ -65,9 +71,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         unmountBtn.font = NSFont.boldSystemFont(ofSize: 13)
         unmountBtn.target = self
         unmountBtn.action = #selector(unmountSelected)
+        unmountButton = unmountBtn
         contentView.addSubview(unmountBtn)
 
-        autoUnmountCheckbox = NSButton(checkboxWithTitle: "锁屏后自动 Unmount 所有外接硬盘（程序运行期间生效）", target: self, action: #selector(checkboxChanged))
+        autoUnmountCheckbox = NSButton(checkboxWithTitle: "锁屏或熄屏后安全卸载空闲外接盘（运行期间生效）", target: self, action: #selector(checkboxChanged))
         autoUnmountCheckbox.frame = NSRect(x: 24, y: 46, width: 392, height: 24)
         let savedState = UserDefaults.standard.object(forKey: "AutoUnmountOnLock") as? Bool ?? true
         autoUnmountCheckbox.state = savedState ? .on : .off
@@ -84,6 +91,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             selector: #selector(screenDidLock),
             name: NSNotification.Name("com.apple.screenIsLocked"),
             object: nil
+        )
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(screenDidUnlock),
+            name: NSNotification.Name("com.apple.screenIsUnlocked"),
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(screensDidSleep),
+            name: NSWorkspace.screensDidSleepNotification, object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(screensDidWake),
+            name: NSWorkspace.screensDidWakeNotification, object: nil
         )
 
         refreshDisks()
@@ -102,46 +123,81 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func checkboxChanged() {
         let isChecked = (autoUnmountCheckbox.state == .on)
         UserDefaults.standard.set(isChecked, forKey: "AutoUnmountOnLock")
-        logLabel.stringValue = isChecked ? "✅ 已开启：锁屏时将自动卸载所有外接盘" : "⚪️ 已关闭锁屏自动卸载"
+        logLabel.stringValue = isChecked ? "✅ 已开启：锁屏或熄屏时检查读写后安全卸载" : "⚪️ 已关闭自动卸载"
     }
 
     @objc func screenDidLock() {
-        guard autoUnmountCheckbox.state == .on else { return }
-        refreshDisks()
-        var unmountedCount = 0
-        for v in volumes where v.mounted {
-            let res = runCommand("/usr/sbin/diskutil", args: ["unmount", v.id])
-            if !res.ok {
-                _ = runCommand("/usr/sbin/diskutil", args: ["unmount", "force", v.id])
-            }
-            unmountedCount += 1
-        }
-        if unmountedCount > 0 {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "HH:mm:ss"
-            let timeStr = formatter.string(from: Date())
-            DispatchQueue.main.async {
-                self.refreshDisks()
-                self.logLabel.stringValue = "🔒 已在 \(timeStr) 锁屏时自动卸载 \(unmountedCount) 个外接卷宗"
-            }
-        }
+        screenLocked = true
+        automaticallyUnmount()
     }
 
-    func runCommand(_ launchPath: String, args: [String]) -> (ok: Bool, output: String) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: launchPath)
-        task.arguments = args
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = pipe
-        do {
-            try task.run()
-            task.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let out = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return (task.terminationStatus == 0, out)
-        } catch {
-            return (false, error.localizedDescription)
+    @objc func screenDidUnlock() {
+        screenLocked = false
+    }
+
+    @objc func screensDidSleep() {
+        displayAsleep = true
+        automaticallyUnmount()
+    }
+
+    @objc func screensDidWake() {
+        displayAsleep = false
+    }
+
+    func automaticallyUnmount() {
+        guard autoUnmountCheckbox.state == .on, !diskOperationInProgress else { return }
+        refreshDisks()
+        let mountedVolumes = volumes.filter { $0.mounted }
+        guard !mountedVolumes.isEmpty else { return }
+        safelyUnmount(mountedVolumes, automatic: true)
+    }
+
+    func safelyUnmount(_ targets: [ExternalVolume], automatic: Bool) {
+        guard !diskOperationInProgress else { return }
+        diskOperationInProgress = true
+        mountButton.isEnabled = false
+        unmountButton.isEnabled = false
+        logLabel.stringValue = "正在检查硬盘读写，请稍候..."
+        DispatchQueue.global(qos: .utility).async {
+            var unmountedCount = 0
+            var failures: [String] = []
+            for volume in targets {
+                let result = SafeUnmount().unmount(volume.id, shouldProceed: {
+                    guard automatic else { return true }
+                    return DispatchQueue.main.sync {
+                        self.autoUnmountCheckbox.state == .on &&
+                            (self.screenLocked || self.displayAsleep)
+                    }
+                })
+                if result.ok {
+                    unmountedCount += 1
+                } else {
+                    failures.append("\(volume.name)：\(result.output)")
+                }
+            }
+            let count = unmountedCount
+            let failedCount = failures.count
+            let details = failures.joined(separator: "\n")
+            DispatchQueue.main.async {
+                self.diskOperationInProgress = false
+                self.mountButton.isEnabled = true
+                self.unmountButton.isEnabled = true
+                self.refreshDisks()
+                self.logLabel.stringValue = failedCount == 0
+                    ? "💤 已安全卸载 \(count) 个外接卷宗"
+                    : "⚠️ 已卸载 \(count) 个，未卸载 \(failedCount) 个（详情见提示）"
+                self.logLabel.toolTip = details.isEmpty ? nil : details
+                if !details.isEmpty {
+                    NSLog("Safe unmount: %@", details)
+                    if !automatic {
+                        let alert = NSAlert()
+                        alert.messageText = "未执行卸载"
+                        alert.informativeText = details
+                        alert.addButton(withTitle: "好")
+                        alert.runModal()
+                    }
+                }
+            }
         }
     }
 
@@ -204,6 +260,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func mountSelected() {
+        guard !diskOperationInProgress else { return }
         let idx = diskPopup.indexOfSelectedItem
         guard idx >= 0 && idx < volumes.count else { return }
         let v = volumes[idx]
@@ -217,31 +274,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func unmountSelected() {
+        guard !diskOperationInProgress else { return }
         let idx = diskPopup.indexOfSelectedItem
         guard idx >= 0 && idx < volumes.count else { return }
         let v = volumes[idx]
-        logLabel.stringValue = "正在卸载 \(v.name)..."
-        var res = runCommand("/usr/sbin/diskutil", args: ["unmount", v.id])
-        if !res.ok {
-            let alert = NSAlert()
-            alert.messageText = "无法正常卸载 \(v.name)"
-            alert.informativeText = "可能有后台进程（如 Spotlight）正在占用该盘，是否执行强制卸载 (Force Unmount)？\n\n详情：\(res.output)"
-            alert.addButton(withTitle: "强制卸载")
-            alert.addButton(withTitle: "取消")
-            if alert.runModal() == .alertFirstButtonReturn {
-                res = runCommand("/usr/sbin/diskutil", args: ["unmount", "force", v.id])
-            } else {
-                logLabel.stringValue = "已取消卸载操作"
-                return
-            }
-        }
-        refreshDisks()
-        logLabel.stringValue = res.ok ? "💤 \(v.name) 已安全卸载并切入待机" : "❌ 卸载失败：\(res.output)"
+        safelyUnmount([v], automatic: false)
     }
 }
-
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.setActivationPolicy(.regular)
-app.run()

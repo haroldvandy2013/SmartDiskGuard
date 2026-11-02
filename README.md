@@ -16,11 +16,14 @@
 - **🔌 物理常插，软件级休眠与秒级唤醒**：
   - 无需反复插拔 USB/雷电数据线。日常不使用外接备份盘时，点击 **Unmount (卸载休眠)** 即可卸载文件系统并让硬盘切入低功耗停转待机状态，彻底隔离 macOS 后台的文件枚举与索引请求。
   - 需要备份或读取数据时，点击 **Mount (挂载连接)** 即可在 1 秒内重新挂载回系统。
-- **🔒 锁屏自动 Unmount 保护（可选复选框）**：
-  - 内置 `锁屏后自动 Unmount 所有外接硬盘` 开关（自动记忆勾选状态）。
-  - 基于 macOS 原生 `DistributedNotificationCenter` 监听 `com.apple.screenIsLocked` 广播，零 CPU 轮询开销。一旦锁屏离开电脑，自动安全卸载所有已挂载的外接硬盘，杜绝睡眠期间发生 I/O 死锁。
-- **🛡️ 防占用强制卸载兜底**：
-  - 当遇到 Spotlight (`mds`) 或后台进程占用导致普通卸载受阻时，自动弹窗支持交互式执行 `Force Unmount`。
+- **🔒 锁屏 / 熄屏安全自动 Unmount（可选复选框）**：
+  - 内置 `锁屏或熄屏后安全卸载空闲外接盘` 开关（自动记忆勾选状态）。
+  - 监听 macOS 锁屏广播及 `NSWorkspace.screensDidSleepNotification`，仅在事件发生时检查，无后台定时轮询。解锁且屏幕恢复，或关闭开关，会取消尚未执行的自动卸载。
+- **🛡️ 自动和手动卸载共用读写保护**：
+  - 通过 IOKit 检查卷宗对应的物理磁盘读写统计，连续两个 1 秒采样区间无变化，且卸载前复查通过，才尝试普通 `diskutil unmount`；APFS 检查所有底层物理存储盘，同盘其他卷宗的读写也会阻止卸载。
+  - 检测到读写、设备变化、统计缺失或检查失败时保留挂载；普通卸载被 macOS 拒绝时不会强制卸载。手动操作弹窗说明原因，自动操作显示成功 / 未卸载数量，详情在提示文字的悬停提示及系统日志中。
+  - 忙碌卷宗被跳过后不会自动等待或重试；空闲后请手动卸载，或在下次锁屏 / 熄屏事件时再次检查。
+  - 采样只能判断观察期间的实际磁盘 I/O，不能保证之后没有新请求，也无法识别所有缓存访问或暂停中的任务。最终由 macOS 普通卸载处理缓存刷新和占用检查；复制或备份任务未结束时仍建议关闭自动卸载。
 - **⚡ 100% 原生编译 & 自动生成高清图标**：
   - 纯 Swift + AppKit 编写，不依赖任何第三方库或运行时环境。
   - 内置 `make_icon.swift`，基于 Apple SF Symbols 动态渲染全尺寸 Retina 圆角渐变图标 (`.icns`)。
@@ -32,9 +35,13 @@
 ```text
 SmartDiskGuard/
 ├── src/
-│   └── SmartDiskGuard.swift      # 主程序源码（GUI + diskutil 调度 + 锁屏事件监听）
+│   ├── SmartDiskGuard.swift      # GUI 与锁屏 / 熄屏事件监听
+│   ├── SafeUnmount.swift         # 物理磁盘读写检查与安全卸载
+│   └── main.swift                # 应用入口
 ├── scripts/
 │   └── make_icon.swift           # 基于 SF Symbols 自动生成 AppIcon.icns 的渲染脚本
+├── tests/
+│   └── main.swift                # 安全卸载回归检查（不执行真实卸载）
 ├── .github/
 │   └── workflows/
 │       └── release.yml           # GitHub Actions 自动编译打包 DMG 工作流
@@ -68,6 +75,20 @@ chmod +x build.sh package_dmg.sh
 ```
 
 脚本会自动在 `dist/` 目录下生成 **`dist/智能外接硬盘管家_安装包.dmg`**，内含应用本体、`Applications` 拖拽快捷方式以及首次打开解除 Gatekeeper 隔离的辅助脚本。
+
+### 3. 运行安全卸载回归检查
+
+在 macOS 上执行以下命令。卸载命令均使用模拟结果，仅实际读取 IOKit 统计，不会挂载或卸载真实硬盘。
+
+```bash
+(
+  set -e
+  test_binary="$(mktemp -t SmartDiskGuardTests)"
+  trap 'rm -f "$test_binary"' EXIT
+  swiftc src/SafeUnmount.swift tests/main.swift -o "$test_binary"
+  "$test_binary"
+)
+```
 
 ---
 
