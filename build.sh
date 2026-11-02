@@ -4,11 +4,13 @@ set -e
 BUILD_DIR="dist"
 APP_NAME="智能外接硬盘管家.app"
 APP_DIR="$BUILD_DIR/$APP_NAME"
+APP_VERSION="${APP_VERSION:-0.1.0}"
+APP_BUILD="${APP_BUILD:-1}"
 
 rm -rf "$BUILD_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 
-cat << 'PLIST_EOF' > "$APP_DIR/Contents/Info.plist"
+cat << PLIST_EOF > "$APP_DIR/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -26,7 +28,9 @@ cat << 'PLIST_EOF' > "$APP_DIR/Contents/Info.plist"
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>$APP_VERSION</string>
+    <key>CFBundleVersion</key>
+    <string>$APP_BUILD</string>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
     <key>LSArchitecturePriority</key>
@@ -50,9 +54,7 @@ else
 fi
 
 echo "🎨 正在渲染应用高清圆角图标..."
-/usr/bin/swift scripts/make_icon.swift
-/usr/bin/iconutil -c icns /tmp/AppIcon.iconset -o "$APP_DIR/Contents/Resources/AppIcon.icns"
-rm -rf /tmp/AppIcon.iconset
+/usr/bin/swift scripts/make_icon.swift "$APP_DIR/Contents/Resources/AppIcon.icns"
 
 echo "✍️ 正在签名与清理隔离属性..."
 /usr/bin/codesign --force --deep --sign - "$APP_DIR"
