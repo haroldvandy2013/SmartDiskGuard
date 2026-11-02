@@ -4,8 +4,8 @@ set -e
 BUILD_DIR="dist"
 APP_NAME="智能外接硬盘管家.app"
 APP_DIR="$BUILD_DIR/$APP_NAME"
-APP_VERSION="${APP_VERSION:-0.1.0}"
-APP_BUILD="${APP_BUILD:-1}"
+APP_VERSION="${APP_VERSION:-0.2.0}"
+APP_BUILD="${APP_BUILD:-2}"
 
 rm -rf "$BUILD_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"

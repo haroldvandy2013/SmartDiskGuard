@@ -74,7 +74,7 @@ chmod +x build.sh package_dmg.sh
 ./package_dmg.sh
 ```
 
-脚本会自动在 `dist/` 目录下生成 **`dist/智能外接硬盘管家_安装包.dmg`**，内含应用本体、`Applications` 拖拽快捷方式以及首次打开解除 Gatekeeper 隔离的辅助脚本。
+脚本会自动在 `dist/` 目录下生成 **`dist/SmartDiskGuard-v0.2.0-universal.dmg`**，内含应用本体、`Applications` 拖拽快捷方式以及首次打开解除 Gatekeeper 隔离的辅助脚本。发布其他版本时，可为构建和打包命令设置 `APP_VERSION`。
 
 ### 3. 运行安全卸载回归检查
 
