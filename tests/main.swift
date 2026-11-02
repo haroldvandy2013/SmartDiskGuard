@@ -30,6 +30,11 @@ final class Fixture {
     var activityFailure = false
     var unmountOK = true
     var onWait: (() -> Void)?
+    var volumeIdentity = VolumeIdentity(
+        registryID: 90, device: "/dev/disk9s2", mountPoint: "/Volumes/Test", filesystemID: [1, 2]
+    )
+    var identityFailure = false
+    var onInfo: (() -> Void)?
 
     var service: SafeUnmount {
         SafeUnmount(
@@ -38,6 +43,7 @@ final class Fixture {
                 self.commands.append(args)
                 if args.first == "info" {
                     if let failure = self.infoFailure { return failure }
+                    self.onInfo?()
                     return plist(self.stores[args[2]] ?? self.info)
                 }
                 expect(args == ["unmount", self.info["DeviceIdentifier"] as! String],
@@ -53,6 +59,10 @@ final class Fixture {
             wait: {
                 self.waits.append($0)
                 self.onWait?()
+            },
+            identity: { _, _ in
+                if self.identityFailure { throw UnmountCheckError("Mount information unavailable") }
+                return self.volumeIdentity
             }
         )
     }
@@ -72,7 +82,7 @@ test("idle disk requires two one-second intervals and a final sample") {
     expect(f.service.unmount("disk9s2").ok, "Idle disk should unmount")
     expect(f.waits == [1, 1], "Must observe two seconds")
     expect(f.sampledDisks == Array(repeating: "disk9", count: 4), "Must check physical disk")
-    expect(f.commands.filter { $0.first == "info" }.count == 2, "Must revalidate identity")
+    expect(f.commands.filter { $0.first == "info" }.count == 1, "No diskutil info during idle sampling")
     expect(f.unmountCommands.count == 1, "Exactly one normal unmount")
 }
 
@@ -156,20 +166,44 @@ test("internal, whole, unmounted and unidentified volumes are rejected") {
     }
 }
 
-test("mount or UUID changes during observation block unmount") {
-    for key in ["MountPoint", "VolumeUUID"] {
+test("mount or volume device changes during observation block unmount") {
+    for changed in [
+        VolumeIdentity(registryID: 91, device: "/dev/disk9s2", mountPoint: "/Volumes/Test", filesystemID: [1, 2]),
+        VolumeIdentity(registryID: 90, device: "/dev/disk9s2", mountPoint: "/Volumes/Other", filesystemID: [1, 2]),
+        VolumeIdentity(registryID: 90, device: "/dev/disk9s2", mountPoint: "/Volumes/Test", filesystemID: [3, 4]),
+        VolumeIdentity(registryID: 90, device: "/dev/disk10s2", mountPoint: "/Volumes/Test", filesystemID: [1, 2])
+    ] {
         let f = Fixture()
-        f.onWait = { f.info[key] = "changed" }
+        f.onWait = { f.volumeIdentity = changed }
         expect(!f.service.unmount("disk9s2").ok, "Changed target must block")
         expect(f.unmountCommands.isEmpty, "No unmount")
     }
 }
 
-test("disk info failure on final recheck blocks unmount") {
+test("cached identity failure on final recheck blocks unmount") {
     let f = Fixture()
-    f.onWait = { f.infoFailure = CommandResult(ok: false, output: "device disconnected") }
+    f.onWait = { f.identityFailure = true }
     expect(!f.service.unmount("disk9s2").ok, "Final info failure must block")
     expect(f.unmountCommands.isEmpty, "No unmount")
+}
+
+test("metadata-induced reads happen before the idle baseline") {
+    let f = Fixture()
+    var infoCount = 0
+    f.onInfo = {
+        expect(f.sampledDisks.isEmpty, "Metadata must never be queried after sampling starts")
+        infoCount += 1
+        f.samples = [DiskActivity(registryID: 9, counters: [373248, 0, 207, 0, 31031635, 0])]
+    }
+    expect(f.service.unmount("disk9s2").ok, "Metadata reads must not cause self-rejection")
+    expect(infoCount == 1 && f.unmountCommands.count == 1, "One metadata check and normal unmount")
+}
+
+test("missing initial cached identity fails closed") {
+    let f = Fixture()
+    f.identityFailure = true
+    expect(!f.service.unmount("disk9s2").ok, "Missing identity must block")
+    expect(f.unmountCommands.isEmpty && f.waits.isEmpty, "No sampling or unmount")
 }
 
 test("automatic cancellation before or during observation blocks unmount") {
@@ -245,6 +279,34 @@ test("real IOKit sampling is read-only") {
         fatalError("Nonexistent disk must fail")
     } catch {
         expect(error is UnmountCheckError, "Missing disk must report a check error")
+    }
+}
+
+test("cached mount identity resolves the actual root volume and rejects mismatches") {
+    let result = runCommand("/usr/sbin/diskutil", args: ["info", "-plist", "/"])
+    let data = Data(result.output.utf8)
+    let info = try! PropertyListSerialization.propertyList(from: data, options: [], format: nil) as! [String: Any]
+    let id = info["DeviceIdentifier"] as! String
+    do {
+        let identity = try VolumeIdentity.read(id, "/")
+        expect(identity.registryID != 0 && identity.device == "/dev/\(id)", "Actual mounted device")
+        expect(identity.mountPoint == "/" && identity.filesystemID.count == 2, "Cached mount identity")
+        let repeatedIdentity = try VolumeIdentity.read(id, "/")
+        expect(repeatedIdentity == identity, "Stable cached identity")
+    } catch {
+        fatalError("Cannot read cached mount identity: \(error)")
+    }
+    do {
+        _ = try VolumeIdentity.read(id, "/nonexistent-mount")
+        fatalError("Mismatched mount point must fail")
+    } catch {
+        expect(error is UnmountCheckError, "Mount mismatch must report a check error")
+    }
+    do {
+        _ = try VolumeIdentity.read("disk999999", "/")
+        fatalError("Missing volume must fail")
+    } catch {
+        expect(error is UnmountCheckError, "Missing device must report a check error")
     }
 }
 

@@ -1,5 +1,6 @@
 import Foundation
 import IOKit
+import Darwin
 
 struct CommandResult {
     let ok: Bool
@@ -79,10 +80,56 @@ struct UnmountCheckError: LocalizedError {
     var errorDescription: String? { message }
 }
 
+struct VolumeIdentity: Equatable {
+    let registryID: UInt64
+    let device: String
+    let mountPoint: String
+    let filesystemID: [Int32]
+
+    static func read(_ id: String, _ mountPoint: String) throws -> VolumeIdentity {
+        guard let matching = IOBSDNameMatching(kIOMainPortDefault, 0, id) else {
+            throw UnmountCheckError("无法定位卷宗设备 \(id)")
+        }
+        let entry = IOServiceGetMatchingService(kIOMainPortDefault, matching)
+        guard entry != 0 else { throw UnmountCheckError("卷宗设备 \(id) 已断开") }
+        defer { IOObjectRelease(entry) }
+        var registryID: UInt64 = 0
+        guard IORegistryEntryGetRegistryEntryID(entry, &registryID) == KERN_SUCCESS else {
+            throw UnmountCheckError("无法确认卷宗设备身份")
+        }
+        // MNT_NOWAIT reads cached mount information without querying the filesystem.
+        let count = getfsstat(nil, 0, MNT_NOWAIT)
+        guard count > 0 else { throw UnmountCheckError("无法读取系统挂载信息") }
+        var mounts = Array<statfs>(repeating: statfs(), count: Int(count) + 16)
+        let loaded = mounts.withUnsafeMutableBytes {
+            getfsstat($0.baseAddress?.assumingMemoryBound(to: statfs.self), Int32($0.count), MNT_NOWAIT)
+        }
+        guard loaded > 0, Int(loaded) < mounts.count else {
+            throw UnmountCheckError("无法完整读取系统挂载信息")
+        }
+        for mount in mounts.prefix(Int(loaded)) {
+            let path = withUnsafeBytes(of: mount.f_mntonname) {
+                String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self)
+            }
+            let device = withUnsafeBytes(of: mount.f_mntfromname) {
+                String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self)
+            }
+            if path == mountPoint, device == "/dev/\(id)" {
+                return VolumeIdentity(
+                    registryID: registryID, device: device, mountPoint: path,
+                    filesystemID: [mount.f_fsid.val.0, mount.f_fsid.val.1]
+                )
+            }
+        }
+        throw UnmountCheckError("卷宗挂载信息已变化，已取消卸载")
+    }
+}
+
 struct SafeUnmount {
     var command: (String, [String]) -> CommandResult = { runCommand($0, args: $1) }
     var activity: (String) throws -> DiskActivity = DiskActivity.read
     var wait: (TimeInterval) -> Void = Thread.sleep(forTimeInterval:)
+    var identity: (String, String) throws -> VolumeIdentity = VolumeIdentity.read
 
     private struct Target: Equatable {
         let uuid: String
@@ -143,6 +190,7 @@ struct SafeUnmount {
         do {
             guard shouldProceed() else { throw UnmountCheckError("已取消自动卸载") }
             let initialTarget = try target(id)
+            let initialIdentity = try identity(id, initialTarget.mountPoint)
             let baseline = try initialTarget.disks.map(activity)
             // Require two consecutive one-second intervals without any physical disk I/O.
             for _ in 0..<2 {
@@ -152,7 +200,7 @@ struct SafeUnmount {
                     throw UnmountCheckError("检测到硬盘读写或设备变化，已保留挂载，请空闲后重试")
                 }
             }
-            guard try target(id) == initialTarget else {
+            guard try identity(id, initialTarget.mountPoint) == initialIdentity else {
                 throw UnmountCheckError("卷宗挂载或设备信息已变化，已取消卸载")
             }
             guard shouldProceed() else { throw UnmountCheckError("已取消自动卸载") }
