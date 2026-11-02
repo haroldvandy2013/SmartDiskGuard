@@ -6,7 +6,7 @@ if [ ! -d "dist/智能外接硬盘管家.app" ]; then
 fi
 
 STAGE_DIR="/tmp/SmartDiskGuard_DMG"
-DMG_PATH="dist/SmartDiskGuard-v${APP_VERSION:-0.2.0}-universal.dmg"
+DMG_PATH="dist/SmartDiskGuard-v${APP_VERSION:-0.2.1}-universal.dmg"
 rm -rf "$STAGE_DIR" "$DMG_PATH"
 mkdir -p "$STAGE_DIR"
 

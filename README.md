@@ -27,6 +27,8 @@
 - **⚡ 100% 原生编译 & 自动生成高清图标**：
   - 纯 Swift + AppKit 编写，不依赖任何第三方库或运行时环境。
   - 内置 `make_icon.swift`，基于 Apple SF Symbols 动态渲染全尺寸 Retina 圆角渐变图标 (`.icns`)。
+- **🏷️ 运行版本可见**：
+  - 窗口标题及界面右上角常驻显示版本号（例如 `v0.2.1`），直接读取当前运行应用的 `Info.plist`，不受状态提示变化影响。
 
 ---
 
@@ -74,7 +76,7 @@ chmod +x build.sh package_dmg.sh
 ./package_dmg.sh
 ```
 
-脚本会自动在 `dist/` 目录下生成 **`dist/SmartDiskGuard-v0.2.0-universal.dmg`**，内含应用本体、`Applications` 拖拽快捷方式以及首次打开解除 Gatekeeper 隔离的辅助脚本。发布其他版本时，可为构建和打包命令设置 `APP_VERSION`。
+脚本会自动在 `dist/` 目录下生成 **`dist/SmartDiskGuard-v0.2.1-universal.dmg`**，内含应用本体、`Applications` 拖拽快捷方式以及首次打开解除 Gatekeeper 隔离的辅助脚本。发布其他版本时，可为构建和打包命令设置 `APP_VERSION`。
 
 ### 3. 运行安全卸载回归检查
 

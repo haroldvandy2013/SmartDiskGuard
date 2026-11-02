@@ -8,6 +8,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var logLabel: NSTextField!
     var mountButton: NSButton!
     var unmountButton: NSButton!
+    var versionLabel: NSTextField!
     var diskOperationInProgress = false
     var screenLocked = false
     var displayAsleep = false
@@ -28,7 +29,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.center()
-        window.title = "智能外接硬盘管家 (SmartDiskGuard)"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let versionText: String
+        if let version = version, !version.isEmpty {
+            versionText = "v\(version)"
+        } else {
+            versionText = "版本信息缺失"
+            NSLog("SmartDiskGuard: missing application version in Info.plist")
+        }
+        window.title = "智能外接硬盘管家 — \(versionText)"
         window.isReleasedWhenClosed = false
 
         let contentView = NSView(frame: rect)
@@ -38,6 +47,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         titleLabel.frame = NSRect(x: 24, y: 202, width: 140, height: 20)
         titleLabel.font = NSFont.boldSystemFont(ofSize: 13)
         contentView.addSubview(titleLabel)
+
+        versionLabel = NSTextField(labelWithString: versionText)
+        versionLabel.frame = NSRect(x: 174, y: 202, width: 242, height: 20)
+        versionLabel.font = NSFont.systemFont(ofSize: 11)
+        versionLabel.textColor = .secondaryLabelColor
+        versionLabel.alignment = .right
+        contentView.addSubview(versionLabel)
 
         diskPopup = NSPopUpButton(frame: NSRect(x: 24, y: 168, width: 310, height: 28), pullsDown: false)
         diskPopup.target = self
