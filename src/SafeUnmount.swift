@@ -186,11 +186,20 @@ struct SafeUnmount {
         return Target(uuid: uuid, mountPoint: mountPoint, disks: Array(Set(disks)).sorted())
     }
 
-    func unmount(_ id: String, shouldProceed: () -> Bool = { true }) -> CommandResult {
+    func unmount(
+        _ id: String,
+        expectedIdentity: VolumeIdentity? = nil,
+        identityVerified: (VolumeIdentity) -> Void = { _ in },
+        shouldProceed: () -> Bool = { true }
+    ) -> CommandResult {
         do {
             guard shouldProceed() else { throw UnmountCheckError("已取消自动卸载") }
             let initialTarget = try target(id)
             let initialIdentity = try identity(id, initialTarget.mountPoint)
+            if let expectedIdentity = expectedIdentity, initialIdentity != expectedIdentity {
+                throw UnmountCheckError("卷宗设备或挂载身份已变化，已取消卸载")
+            }
+            identityVerified(initialIdentity)
             let baseline = try initialTarget.disks.map(activity)
             // Require two consecutive one-second intervals without any physical disk I/O.
             for _ in 0..<2 {

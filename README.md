@@ -18,18 +18,19 @@
   - 需要备份或读取数据时，点击 **Mount (挂载连接)** 即可在 1 秒内重新挂载回系统。
 - **🔒 锁屏 / 熄屏安全自动 Unmount（可选复选框）**：
   - 内置 `锁屏或熄屏后安全卸载空闲外接盘` 开关（自动记忆勾选状态）。
-  - 监听 macOS 锁屏广播及 `NSWorkspace.screensDidSleepNotification`，仅在事件发生时检查，无后台定时轮询。解锁且屏幕恢复，或关闭开关，会取消尚未执行的自动卸载。
+  - 监听 macOS 锁屏广播及 `NSWorkspace.screensDidSleepNotification`。自动卸载失败后默认最多重试 10 次，每次失败结束后等待 30 秒（首次尝试之外最多 10 次，共最多 11 次）。全部成功或次数用完后停止，无常驻轮询。解锁且屏幕恢复，或关闭开关，会取消待执行的重试和检查。
+  - 窗口底部的可折叠 **Advanced** 入口可设置重试次数和间隔并保存；次数须为非负整数（0 为不重试），间隔须为正整数秒。设置自动记忆，在下一轮自动卸载时生效；当前轮继续使用启动时的设置。系统整机睡眠期间计时器无法执行，恢复后仍会检查是否允许自动卸载。
 - **🛡️ 自动和手动卸载共用读写保护**：
   - 通过 IOKit 检查卷宗对应的物理磁盘读写统计，连续两个 1 秒采样区间无变化，且卸载前复查通过，才尝试普通 `diskutil unmount`；APFS 检查所有底层物理存储盘，同盘其他卷宗的读写也会阻止卸载。
   - `diskutil info` 仅在采样开始前调用；卸载前使用 `getfsstat(MNT_NOWAIT)` 缓存挂载信息及 IOKit 卷宗设备标识复查身份，避免元数据查询自身触发读盘而被误判为忙碌。
   - 检测到读写、设备变化、统计缺失或检查失败时保留挂载；普通卸载被 macOS 拒绝时不会强制卸载。手动操作弹窗说明原因，自动操作显示成功 / 未卸载数量，详情在提示文字的悬停提示及系统日志中。
-  - 忙碌卷宗被跳过后不会自动等待或重试；空闲后请手动卸载，或在下次锁屏 / 熄屏事件时再次检查。
+  - 每轮只重试失败的卷宗，每次重新检查读写和设备身份；成功的卷宗不再重试。设备断开、重新挂载或被替换后不卸载新的卷宗。手动卸载不自动重试，手动 Mount / Unmount 会取消待执行的自动重试。
   - 采样只能判断观察期间的实际磁盘 I/O，不能保证之后没有新请求，也无法识别所有缓存访问或暂停中的任务。最终由 macOS 普通卸载处理缓存刷新和占用检查；复制或备份任务未结束时仍建议关闭自动卸载。
 - **⚡ 100% 原生编译 & 自动生成高清图标**：
   - 纯 Swift + AppKit 编写，不依赖任何第三方库或运行时环境。
   - 内置 `make_icon.swift`，基于 Apple SF Symbols 动态渲染全尺寸 Retina 圆角渐变图标 (`.icns`)。
 - **🏷️ 运行版本可见**：
-  - 窗口标题及界面右上角常驻显示版本号（例如 `v0.2.2`），直接读取当前运行应用的 `Info.plist`，不受状态提示变化影响。
+  - 窗口标题及界面右上角常驻显示版本号（例如 `v0.3.0`），直接读取当前运行应用的 `Info.plist`，不受状态提示变化影响。
 
 ---
 
@@ -40,11 +41,13 @@ SmartDiskGuard/
 ├── src/
 │   ├── SmartDiskGuard.swift      # GUI 与锁屏 / 熄屏事件监听
 │   ├── SafeUnmount.swift         # 物理磁盘读写检查与安全卸载
+│   ├── UnmountRetry.swift        # 自动重试设置及次数管理
 │   └── main.swift                # 应用入口
 ├── scripts/
 │   └── make_icon.swift           # 基于 SF Symbols 自动生成 AppIcon.icns 的渲染脚本
 ├── tests/
-│   └── main.swift                # 安全卸载回归检查（不执行真实卸载）
+│   ├── main.swift                # 安全卸载及重试策略回归检查
+│   └── gui/main.swift            # Advanced 控件、定时器与取消行为检查
 ├── .github/
 │   └── workflows/
 │       └── release.yml           # GitHub Actions 自动编译打包 DMG 工作流
@@ -77,7 +80,7 @@ chmod +x build.sh package_dmg.sh
 ./package_dmg.sh
 ```
 
-脚本会自动在 `dist/` 目录下生成 **`dist/SmartDiskGuard-v0.2.2-universal.dmg`**，内含应用本体、`Applications` 拖拽快捷方式以及首次打开解除 Gatekeeper 隔离的辅助脚本。发布其他版本时，可为构建和打包命令设置 `APP_VERSION`。
+脚本会自动在 `dist/` 目录下生成 **`dist/SmartDiskGuard-v0.3.0-universal.dmg`**，内含应用本体、`Applications` 拖拽快捷方式以及首次打开解除 Gatekeeper 隔离的辅助脚本。发布其他版本时，可为构建和打包命令设置 `APP_VERSION`。
 
 ### 3. 运行安全卸载回归检查
 
@@ -88,7 +91,19 @@ chmod +x build.sh package_dmg.sh
   set -e
   test_binary="$(mktemp -t SmartDiskGuardTests)"
   trap 'rm -f "$test_binary"' EXIT
-  swiftc src/SafeUnmount.swift tests/main.swift -o "$test_binary"
+  swiftc src/SafeUnmount.swift src/UnmountRetry.swift tests/main.swift -o "$test_binary"
+  "$test_binary"
+)
+```
+
+界面与定时器集成检查使用模拟卷宗，不执行真实挂载或卸载：
+
+```bash
+(
+  set -e
+  test_binary="$(mktemp -t SmartDiskGuardUITests)"
+  trap 'rm -f "$test_binary"' EXIT
+  swiftc src/SafeUnmount.swift src/UnmountRetry.swift src/SmartDiskGuard.swift tests/gui/main.swift -o "$test_binary"
   "$test_binary"
 )
 ```

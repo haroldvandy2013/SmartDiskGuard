@@ -12,6 +12,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var diskOperationInProgress = false
     var screenLocked = false
     var displayAsleep = false
+    var advancedButton: NSButton!
+    var advancedView: NSView!
+    var retryCountField: NSTextField!
+    var retryIntervalField: NSTextField!
+    var advancedExpanded = false
+    var retrySettings = UnmountRetrySettings.defaults
+    var retryTimer: Timer?
+    var automaticGeneration = 0
+    struct UnmountTarget {
+        let volume: ExternalVolume
+        var identity: VolumeIdentity?
+    }
+    var retryPlan: UnmountRetryPlan<UnmountTarget>?
+    var preferences = UserDefaults.standard
+    var makeSafeUnmount: () -> SafeUnmount = { SafeUnmount() }
     
     struct ExternalVolume {
         let id: String
@@ -92,7 +107,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         autoUnmountCheckbox = NSButton(checkboxWithTitle: "锁屏或熄屏后安全卸载空闲外接盘（运行期间生效）", target: self, action: #selector(checkboxChanged))
         autoUnmountCheckbox.frame = NSRect(x: 24, y: 46, width: 392, height: 24)
-        let savedState = UserDefaults.standard.object(forKey: "AutoUnmountOnLock") as? Bool ?? true
+        let savedState = preferences.object(forKey: "AutoUnmountOnLock") as? Bool ?? true
         autoUnmountCheckbox.state = savedState ? .on : .off
         contentView.addSubview(autoUnmountCheckbox)
 
@@ -101,6 +116,41 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         logLabel.font = NSFont.systemFont(ofSize: 11)
         logLabel.textColor = .secondaryLabelColor
         contentView.addSubview(logLabel)
+
+        for view in contentView.subviews {
+            view.frame.origin.y += 32
+        }
+        window.setContentSize(NSSize(width: 440, height: 282))
+        advancedButton = NSButton(title: "▸ Advanced", target: self, action: #selector(toggleAdvanced))
+        advancedButton.frame = NSRect(x: 24, y: 8, width: 140, height: 24)
+        advancedButton.isBordered = false
+        advancedButton.alignment = .left
+        contentView.addSubview(advancedButton)
+
+        advancedView = NSView(frame: NSRect(x: 24, y: 8, width: 392, height: 96))
+        advancedView.isHidden = true
+        contentView.addSubview(advancedView)
+        loadRetrySettings()
+        let retryLabel = NSTextField(labelWithString: "自动卸载重试次数：")
+        retryLabel.frame = NSRect(x: 0, y: 66, width: 145, height: 22)
+        advancedView.addSubview(retryLabel)
+        retryCountField = NSTextField(string: "\(retrySettings.retries)")
+        retryCountField.frame = NSRect(x: 150, y: 64, width: 75, height: 24)
+        advancedView.addSubview(retryCountField)
+        let intervalLabel = NSTextField(labelWithString: "重试间隔（秒）：")
+        intervalLabel.frame = NSRect(x: 0, y: 34, width: 145, height: 22)
+        advancedView.addSubview(intervalLabel)
+        retryIntervalField = NSTextField(string: "\(retrySettings.interval)")
+        retryIntervalField.frame = NSRect(x: 150, y: 32, width: 75, height: 24)
+        advancedView.addSubview(retryIntervalField)
+        let saveButton = NSButton(title: "保存", target: self, action: #selector(saveRetrySettings))
+        saveButton.frame = NSRect(x: 245, y: 32, width: 70, height: 26)
+        saveButton.bezelStyle = .rounded
+        advancedView.addSubview(saveButton)
+        let settingsHint = NSTextField(labelWithString: "首次尝试之外的重试次数；0 为不重试。保存后下轮生效。")
+        settingsHint.font = NSFont.systemFont(ofSize: 10)
+        settingsHint.frame = NSRect(x: 0, y: 4, width: 392, height: 20)
+        advancedView.addSubview(settingsHint)
 
         DistributedNotificationCenter.default().addObserver(
             self,
@@ -138,7 +188,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func checkboxChanged() {
         let isChecked = (autoUnmountCheckbox.state == .on)
-        UserDefaults.standard.set(isChecked, forKey: "AutoUnmountOnLock")
+        preferences.set(isChecked, forKey: "AutoUnmountOnLock")
+        if !isChecked { cancelAutomaticUnmount() }
         logLabel.stringValue = isChecked ? "✅ 已开启：锁屏或熄屏时检查读写后安全卸载" : "⚪️ 已关闭自动卸载"
     }
 
@@ -149,6 +200,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func screenDidUnlock() {
         screenLocked = false
+        if !displayAsleep { cancelAutomaticUnmount() }
     }
 
     @objc func screensDidSleep() {
@@ -158,42 +210,137 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func screensDidWake() {
         displayAsleep = false
+        if !screenLocked { cancelAutomaticUnmount() }
+    }
+
+    func loadRetrySettings() {
+        let defaults = preferences
+        guard defaults.object(forKey: "AutoUnmountRetryCount") != nil ||
+              defaults.object(forKey: "AutoUnmountRetryInterval") != nil else { return }
+        do {
+            retrySettings = try UnmountRetrySettings.parse(
+                retries: defaults.string(forKey: "AutoUnmountRetryCount") ?? "",
+                interval: defaults.string(forKey: "AutoUnmountRetryInterval") ?? ""
+            )
+        } catch {
+            retrySettings = .defaults
+            NSLog("Invalid automatic unmount settings: %@", error.localizedDescription)
+            logLabel.stringValue = "⚠️ 重试设置无效，已恢复默认值"
+        }
+    }
+
+    @objc func toggleAdvanced() {
+        let delta: CGFloat = advancedExpanded ? -104 : 104
+        let top = window.frame.maxY
+        for view in window.contentView!.subviews where view !== advancedView {
+            view.frame.origin.y += delta
+        }
+        window.setContentSize(NSSize(width: 440, height: advancedExpanded ? 282 : 386))
+        window.setFrameOrigin(NSPoint(x: window.frame.minX, y: top - window.frame.height))
+        advancedExpanded.toggle()
+        advancedView.isHidden = !advancedExpanded
+        advancedButton.title = advancedExpanded ? "▾ Advanced" : "▸ Advanced"
+    }
+
+    @objc func saveRetrySettings() {
+        do {
+            retrySettings = try UnmountRetrySettings.parse(
+                retries: retryCountField.stringValue, interval: retryIntervalField.stringValue
+            )
+            preferences.set("\(retrySettings.retries)", forKey: "AutoUnmountRetryCount")
+            preferences.set("\(retrySettings.interval)", forKey: "AutoUnmountRetryInterval")
+            retryCountField.stringValue = "\(retrySettings.retries)"
+            retryIntervalField.stringValue = "\(retrySettings.interval)"
+            logLabel.stringValue = "✅ 重试 \(retrySettings.retries) 次 / 间隔 \(retrySettings.interval) 秒，下轮生效"
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "重试设置无效"
+            alert.informativeText = error.localizedDescription
+            alert.addButton(withTitle: "好")
+            alert.runModal()
+        }
+    }
+
+    var automaticUnmountAllowed: Bool {
+        autoUnmountCheckbox.state == .on && (screenLocked || displayAsleep)
+    }
+
+    func cancelAutomaticUnmount() {
+        automaticGeneration += 1
+        retryTimer?.invalidate()
+        retryTimer = nil
+        let hadPlan = retryPlan != nil
+        retryPlan = nil
+        if hadPlan { logLabel.stringValue = "⚪️ 已取消自动卸载重试" }
     }
 
     func automaticallyUnmount() {
-        guard autoUnmountCheckbox.state == .on, !diskOperationInProgress else { return }
+        guard automaticUnmountAllowed, !diskOperationInProgress, retryPlan == nil else { return }
         refreshDisks()
         let mountedVolumes = volumes.filter { $0.mounted }
         guard !mountedVolumes.isEmpty else { return }
-        safelyUnmount(mountedVolumes, automatic: true)
+        automaticGeneration += 1
+        let targets = mountedVolumes.map { UnmountTarget(volume: $0) }
+        retryPlan = UnmountRetryPlan(targets: targets, settings: retrySettings)
+        safelyUnmount(targets, automatic: true)
     }
 
-    func safelyUnmount(_ targets: [ExternalVolume], automatic: Bool) {
+    func scheduleAutomaticRetry() {
+        guard automaticUnmountAllowed, let plan = retryPlan else {
+            retryPlan = nil
+            return
+        }
+        guard plan.canRetry else {
+            if !plan.pending.isEmpty {
+                logLabel.stringValue = "⚠️ 自动重试已用完（\(plan.settings.retries) 次），仍有 \(plan.pending.count) 个未卸载"
+            }
+            retryPlan = nil
+            return
+        }
+        let generation = automaticGeneration
+        logLabel.stringValue = "⏳ \(plan.settings.interval) 秒后重试 \(plan.retriesUsed + 1)/\(plan.settings.retries)"
+        retryTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(plan.settings.interval), repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            guard generation == self.automaticGeneration, self.automaticUnmountAllowed,
+                  let targets = self.retryPlan?.nextRetry() else { return }
+            self.retryTimer = nil
+            self.safelyUnmount(targets, automatic: true)
+        }
+    }
+
+    func safelyUnmount(_ targets: [UnmountTarget], automatic: Bool) {
         guard !diskOperationInProgress else { return }
         diskOperationInProgress = true
         mountButton.isEnabled = false
         unmountButton.isEnabled = false
         logLabel.stringValue = "正在检查硬盘读写，请稍候..."
+        let generation = automaticGeneration
+        let service = makeSafeUnmount()
         DispatchQueue.global(qos: .utility).async {
             var unmountedCount = 0
             var failures: [String] = []
-            for volume in targets {
-                let result = SafeUnmount().unmount(volume.id, shouldProceed: {
+            var failedTargets: [UnmountTarget] = []
+            for var target in targets {
+                let volume = target.volume
+                let result = service.unmount(volume.id, expectedIdentity: target.identity, identityVerified: {
+                    target.identity = $0
+                }, shouldProceed: {
                     guard automatic else { return true }
                     return DispatchQueue.main.sync {
-                        self.autoUnmountCheckbox.state == .on &&
-                            (self.screenLocked || self.displayAsleep)
+                        generation == self.automaticGeneration && self.automaticUnmountAllowed
                     }
                 })
                 if result.ok {
                     unmountedCount += 1
                 } else {
                     failures.append("\(volume.name)：\(result.output)")
+                    failedTargets.append(target)
                 }
             }
             let count = unmountedCount
             let failedCount = failures.count
             let details = failures.joined(separator: "\n")
+            let pending = failedTargets
             DispatchQueue.main.async {
                 self.diskOperationInProgress = false
                 self.mountButton.isEnabled = true
@@ -203,6 +350,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     ? "💤 已安全卸载 \(count) 个外接卷宗"
                     : "⚠️ 已卸载 \(count) 个，未卸载 \(failedCount) 个（详情见提示）"
                 self.logLabel.toolTip = details.isEmpty ? nil : details
+                if automatic, generation == self.automaticGeneration {
+                    self.retryPlan?.recordFailures(pending)
+                    self.scheduleAutomaticRetry()
+                } else if automatic {
+                    self.logLabel.stringValue = "⚪️ 自动卸载已取消，成功 \(count) 个"
+                }
                 if !details.isEmpty {
                     NSLog("Safe unmount: %@", details)
                     if !automatic {
@@ -277,6 +430,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func mountSelected() {
         guard !diskOperationInProgress else { return }
+        cancelAutomaticUnmount()
         let idx = diskPopup.indexOfSelectedItem
         guard idx >= 0 && idx < volumes.count else { return }
         let v = volumes[idx]
@@ -291,9 +445,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func unmountSelected() {
         guard !diskOperationInProgress else { return }
+        cancelAutomaticUnmount()
         let idx = diskPopup.indexOfSelectedItem
         guard idx >= 0 && idx < volumes.count else { return }
         let v = volumes[idx]
-        safelyUnmount([v], automatic: false)
+        safelyUnmount([UnmountTarget(volume: v)], automatic: false)
     }
 }

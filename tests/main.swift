@@ -315,4 +315,54 @@ test("command runner drains output larger than the pipe buffer") {
     expect(result.ok && result.output.utf8.count == 100000, "Large output must not deadlock")
 }
 
+test("default retry plan allows exactly ten retries after the initial attempt") {
+    let settings = UnmountRetrySettings.defaults
+    expect(settings.retries == 10 && settings.interval == 30, "Exact default settings")
+    var plan = UnmountRetryPlan(targets: ["a", "b"], settings: settings)
+    plan.recordFailures(["b"])
+    for number in 1...10 {
+        expect(plan.canRetry, "Retry \(number) should be available")
+        expect(plan.nextRetry() == ["b"], "Only failed volumes may retry")
+        expect(plan.retriesUsed == number, "Exact retry count")
+        plan.recordFailures(["b"])
+    }
+    expect(!plan.canRetry && plan.nextRetry() == nil, "No eleventh retry")
+}
+
+test("successful retries stop and custom counts are respected") {
+    var plan = UnmountRetryPlan(targets: ["a"], settings: UnmountRetrySettings(retries: 2, interval: 7))
+    expect(plan.settings.interval == 7 && plan.nextRetry() == ["a"], "Custom retry policy")
+    plan.recordFailures([])
+    expect(!plan.canRetry && plan.nextRetry() == nil, "Success stops immediately")
+    let disabled = UnmountRetryPlan(targets: ["a"], settings: UnmountRetrySettings(retries: 0, interval: 30))
+    expect(!disabled.canRetry, "Zero disables retries but not initial attempt")
+}
+
+test("retry settings validate integers and allow zero retry count") {
+    do {
+        let settings = try UnmountRetrySettings.parse(retries: " 0 ", interval: "1")
+        expect(settings == UnmountRetrySettings(retries: 0, interval: 1), "Valid boundary settings")
+    } catch { fatalError("Valid settings rejected: \(error)") }
+    for pair in [("-1", "30"), ("10", "0"), ("10", "-1"), ("1.5", "30"),
+                 ("10", "abc"), ("", "30"), ("99999999999999999999999999", "30")] {
+        do {
+            _ = try UnmountRetrySettings.parse(retries: pair.0, interval: pair.1)
+            fatalError("Invalid settings accepted")
+        } catch { expect(error is UnmountCheckError, "Explicit settings error") }
+    }
+}
+
+test("retry identity prevents unmounting a replacement volume") {
+    let f = Fixture()
+    var pinned: VolumeIdentity?
+    f.samples.append(DiskActivity(registryID: 9, counters: [11, 20, 1, 2, 100, 200]))
+    expect(!f.service.unmount("disk9s2", identityVerified: { pinned = $0 }).ok, "First busy attempt")
+    expect(pinned != nil, "First attempt pins volume identity")
+    f.volumeIdentity = VolumeIdentity(
+        registryID: 91, device: "/dev/disk9s2", mountPoint: "/Volumes/Test", filesystemID: [3, 4]
+    )
+    expect(!f.service.unmount("disk9s2", expectedIdentity: pinned).ok, "Replacement must be rejected")
+    expect(f.unmountCommands.isEmpty, "Never unmount the replacement")
+}
+
 print("\(testCount) checks passed; no real disk was mounted or unmounted.")
