@@ -36,9 +36,11 @@ expect(delegate.advancedView.isHidden && !delegate.advancedExpanded, "Advanced s
 let collapsed = delegate.window.contentView!.frame.height
 let versionY = delegate.versionLabel.frame.minY
 delegate.toggleAdvanced()
-expect(delegate.window.contentView!.frame.height == collapsed + 104, "Expand height")
+expect(delegate.window.contentView!.frame.height == collapsed + 140, "Expand height")
 expect(!delegate.advancedView.isHidden, "Expanded fields visible")
 expect(delegate.advancedButton.frame.minY > delegate.advancedView.frame.maxY, "Disclosure below main UI")
+let logsButton = delegate.advancedView.subviews.compactMap { $0 as? NSButton }.first { $0.title == "日志" }!
+expect(logsButton.frame.maxY < delegate.retryIntervalField.frame.minY, "Logs button has its own row")
 delegate.toggleAdvanced()
 expect(delegate.window.contentView!.frame.height == collapsed, "Collapse height")
 expect(delegate.versionLabel.frame.minY == versionY, "No layout drift")
@@ -55,16 +57,6 @@ var allowSuccess = false
 delegate.makeSafeUnmount = {
     SafeUnmount(
         command: { _, args in
-            if args.first == "info" {
-                let id = args[2]
-                attempts.append(id)
-                let data = try! PropertyListSerialization.data(fromPropertyList: [
-                    "DeviceIdentifier": id, "Internal": false, "WholeDisk": false,
-                    "VolumeUUID": id, "MountPoint": "/Volumes/\(id)",
-                    "ParentWholeDisk": "disk9", "FilesystemType": "hfs"
-                ], format: .xml, options: 0)
-                return CommandResult(ok: true, output: String(decoding: data, as: UTF8.self))
-            }
             expect(args.first == "unmount" && !args.contains("force"), "Only simulated normal unmount")
             return CommandResult(ok: allowSuccess || args[1] == "disk9s2", output: "simulated")
         },
@@ -72,6 +64,14 @@ delegate.makeSafeUnmount = {
         wait: { _ in },
         identity: { id, path in
             VolumeIdentity(registryID: 90, device: "/dev/\(id)", mountPoint: path, filesystemID: [1, 2])
+        },
+        metadata: { id in
+            attempts.append(id)
+            return [
+                "DeviceIdentifier": id, "Internal": false, "WholeDisk": false,
+                "VolumeUUID": id, "MountPoint": "/Volumes/\(id)",
+                "ParentWholeDisk": "disk9", "FilesystemType": "hfs"
+            ]
         }
     )
 }
@@ -146,6 +146,13 @@ delegate.makeSafeUnmount = {
         },
         identity: { id, path in
             VolumeIdentity(registryID: 90, device: "/dev/\(id)", mountPoint: path, filesystemID: [1, 2])
+        },
+        metadata: { id in
+            [
+                "DeviceIdentifier": id, "Internal": false, "WholeDisk": false,
+                "VolumeUUID": id, "MountPoint": "/Volumes/\(id)",
+                "ParentWholeDisk": "disk9", "FilesystemType": "hfs"
+            ]
         }
     )
 }
@@ -155,8 +162,9 @@ expect(simulatedUnmounts == 0 && delegate.retryTimer == nil, "Wake cancels an in
 expect(delegate.mountButton.isEnabled && delegate.unmountButton.isEnabled, "Buttons restored after cancellation")
 delegate.retrySettings = UnmountRetrySettings(retries: 0, interval: 30)
 delegate.makeSafeUnmount = {
-    SafeUnmount(command: { _, _ in
-        runCommand("/bin/sleep", args: ["10"], timeout: 0.1)
+    SafeUnmount(metadata: { _ in
+        let result = runCommand("/bin/sleep", args: ["10"], timeout: 0.1)
+        throw UnmountCheckError(result.output)
     })
 }
 delegate.screensDidSleep()

@@ -128,7 +128,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         advancedButton.alignment = .left
         contentView.addSubview(advancedButton)
 
-        advancedView = NSView(frame: NSRect(x: 24, y: 8, width: 392, height: 96))
+        advancedView = NSView(frame: NSRect(x: 24, y: 8, width: 392, height: 132))
         advancedView.isHidden = true
         contentView.addSubview(advancedView)
         loadRetrySettings()
@@ -148,14 +148,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         saveButton.frame = NSRect(x: 245, y: 32, width: 70, height: 26)
         saveButton.bezelStyle = .rounded
         advancedView.addSubview(saveButton)
-        let logsButton = NSButton(title: "日志", target: self, action: #selector(openDiagnosticLogs))
-        logsButton.frame = NSRect(x: 322, y: 32, width: 70, height: 26)
-        logsButton.bezelStyle = .rounded
-        advancedView.addSubview(logsButton)
         let settingsHint = NSTextField(labelWithString: "首次尝试之外的重试次数；0 为不重试。保存后下轮生效。")
         settingsHint.font = NSFont.systemFont(ofSize: 10)
         settingsHint.frame = NSRect(x: 0, y: 4, width: 392, height: 20)
         advancedView.addSubview(settingsHint)
+        for view in advancedView.subviews {
+            view.frame.origin.y += 36
+        }
+        let logsButton = NSButton(title: "日志", target: self, action: #selector(openDiagnosticLogs))
+        logsButton.frame = NSRect(x: 0, y: 4, width: 70, height: 26)
+        logsButton.bezelStyle = .rounded
+        advancedView.addSubview(logsButton)
+        let retentionLabel = NSTextField(labelWithString: "最多保留 10 天 / 总大小 10 MB")
+        retentionLabel.frame = NSRect(x: 82, y: 7, width: 300, height: 20)
+        retentionLabel.font = NSFont.systemFont(ofSize: 11)
+        retentionLabel.textColor = .secondaryLabelColor
+        advancedView.addSubview(retentionLabel)
 
         DistributedNotificationCenter.default().addObserver(
             self,
@@ -194,6 +202,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         DiagnosticLog.shared.write("app terminating operationInProgress=\(diskOperationInProgress)")
         cancelAutomaticUnmount()
+        CommandProcesses.shared.terminateOwnedCommands()
     }
 
     @objc func checkboxChanged() {
@@ -244,12 +253,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func toggleAdvanced() {
-        let delta: CGFloat = advancedExpanded ? -104 : 104
+        let delta: CGFloat = advancedExpanded ? -140 : 140
         let top = window.frame.maxY
         for view in window.contentView!.subviews where view !== advancedView {
             view.frame.origin.y += delta
         }
-        window.setContentSize(NSSize(width: 440, height: advancedExpanded ? 282 : 386))
+        window.setContentSize(NSSize(width: 440, height: advancedExpanded ? 282 : 422))
         window.setFrameOrigin(NSPoint(x: window.frame.minX, y: top - window.frame.height))
         advancedExpanded.toggle()
         advancedView.isHidden = !advancedExpanded
@@ -422,20 +431,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 for p in parts {
                     let devId = p["DeviceIdentifier"] as? String ?? ""
                     var volName = p["VolumeName"] as? String ?? ""
-                    var mountPt = p["MountPoint"] as? String ?? ""
+                    let mountPt = p["MountPoint"] as? String ?? ""
                     let content = p["Content"] as? String ?? ""
 
                     if ["EFI", "Apple_APFS_ISC", "Apple_APFS_Recovery"].contains(content) { continue }
                     if ["EFI", "Recovery", "Preboot", "VM", "Update"].contains(volName) { continue }
 
                     if volName.isEmpty && !devId.isEmpty {
-                        let infoRes = runCommand("/usr/sbin/diskutil", args: ["info", "-plist", devId])
-                        if infoRes.ok, let iData = infoRes.output.data(using: .utf8),
-                           let iPlist = try? PropertyListSerialization.propertyList(from: iData, options: [], format: nil) as? [String: Any] {
-                            if (iPlist["Internal"] as? Bool) == true { continue }
-                            volName = (iPlist["VolumeName"] as? String) ?? (iPlist["MediaName"] as? String) ?? devId
-                            mountPt = (iPlist["MountPoint"] as? String) ?? ""
-                        }
+                        volName = devId
                     }
 
                     let display = volName.isEmpty ? devId : volName

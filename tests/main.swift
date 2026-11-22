@@ -41,11 +41,6 @@ final class Fixture {
             command: { path, args in
                 expect(path == "/usr/sbin/diskutil", "Unexpected executable")
                 self.commands.append(args)
-                if args.first == "info" {
-                    if let failure = self.infoFailure { return failure }
-                    self.onInfo?()
-                    return plist(self.stores[args[2]] ?? self.info)
-                }
                 expect(args == ["unmount", self.info["DeviceIdentifier"] as! String],
                        "Only normal volume unmount is allowed")
                 return CommandResult(ok: self.unmountOK, output: "test unmount result")
@@ -63,6 +58,16 @@ final class Fixture {
             identity: { _, _ in
                 if self.identityFailure { throw UnmountCheckError("Mount information unavailable") }
                 return self.volumeIdentity
+            },
+            metadata: { id in
+                if let failure = self.infoFailure {
+                    guard failure.ok else { throw UnmountCheckError(failure.output) }
+                    return try PropertyListSerialization.propertyList(
+                        from: Data(failure.output.utf8), options: [], format: nil
+                    ) as? [String: Any] ?? [:]
+                }
+                self.onInfo?()
+                return self.stores[id] ?? self.info
             }
         )
     }
@@ -82,7 +87,7 @@ test("idle disk requires two one-second intervals and a final sample") {
     expect(f.service.unmount("disk9s2").ok, "Idle disk should unmount")
     expect(f.waits == [1, 1], "Must observe two seconds")
     expect(f.sampledDisks == Array(repeating: "disk9", count: 4), "Must check physical disk")
-    expect(f.commands.filter { $0.first == "info" }.count == 1, "No diskutil info during idle sampling")
+    expect(!f.commands.contains { $0.first == "info" }, "Never invoke diskutil info")
     expect(f.unmountCommands.count == 1, "Exactly one normal unmount")
 }
 
@@ -350,21 +355,93 @@ test("command launch errors are explicit") {
     expect(!result.ok && !result.timedOut && !result.output.isEmpty, "Report launch failure")
 }
 
-test("diagnostic logs rotate and retain only three backups") {
+test("app exit cleanup terminates only registered commands and lets them return") {
+    let marker = FileManager.default.temporaryDirectory.appendingPathComponent("SmartDiskGuardOwnedTest-\(UUID().uuidString)")
+    defer { try! FileManager.default.removeItem(at: marker) }
+    let finished = DispatchSemaphore(value: 0)
+    DispatchQueue.global().async {
+        let result = runCommand("/usr/bin/python3", args: [
+            "-c", "import pathlib,time,sys; pathlib.Path(sys.argv[1]).write_text('ready'); time.sleep(20)", marker.path
+        ], timeout: 25)
+        expect(!result.ok, "Cancelled owned command must report failure")
+        finished.signal()
+    }
+    let deadline = Date().addingTimeInterval(5)
+    while !FileManager.default.fileExists(atPath: marker.path), Date() < deadline {
+        Thread.sleep(forTimeInterval: 0.01)
+    }
+    expect(FileManager.default.fileExists(atPath: marker.path), "Owned child started")
+    CommandProcesses.shared.terminateOwnedCommands()
+    expect(finished.wait(timeout: .now() + 3) == .success, "Exit cleanup releases waiting command")
+}
+
+test("diagnostic logs rotate and retain only nine backups") {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("SmartDiskGuardLogsTests-\(UUID().uuidString)")
     defer {
         do { try FileManager.default.removeItem(at: directory) }
         catch { fatalError("Cannot clean log test directory: \(error)") }
     }
     let logger = DiagnosticLog(directory: directory, maxBytes: 1)
-    for index in 1...6 { logger.write("test-entry-\(index)") }
+    for index in 1...12 { logger.write("test-entry-\(index)") }
     do {
         let files = try FileManager.default.contentsOfDirectory(atPath: directory.path)
-        expect(Set(files) == Set(["SmartDiskGuard.log", "SmartDiskGuard.1.log", "SmartDiskGuard.2.log", "SmartDiskGuard.3.log"]), "Bounded retained files")
+        expect(Set(files) == Set(["SmartDiskGuard.log"] + (1...9).map { "SmartDiskGuard.\($0).log" }), "Bounded retained files")
         let current = try String(contentsOf: directory.appendingPathComponent("SmartDiskGuard.log"), encoding: .utf8)
-        let oldest = try String(contentsOf: directory.appendingPathComponent("SmartDiskGuard.3.log"), encoding: .utf8)
-        expect(current.contains("test-entry-6") && oldest.contains("test-entry-3"), "Correct rotation order")
+        let oldest = try String(contentsOf: directory.appendingPathComponent("SmartDiskGuard.9.log"), encoding: .utf8)
+        expect(current.contains("test-entry-12") && oldest.contains("test-entry-3"), "Correct rotation order")
     } catch { fatalError("Cannot inspect log rotation: \(error)") }
+}
+
+test("log expiration removes an active file even if it was recently appended") {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("SmartDiskGuardAgeTests-\(UUID().uuidString)")
+    defer { try! FileManager.default.removeItem(at: directory) }
+    var clock = Date()
+    let logger = DiagnosticLog(directory: directory, now: { clock })
+    logger.write("old-entry")
+    clock = clock.addingTimeInterval(9 * 24 * 60 * 60)
+    logger.write("recent-entry-in-old-file")
+    let before = try! String(contentsOf: directory.appendingPathComponent("SmartDiskGuard.log"), encoding: .utf8)
+    expect(before.contains("old-entry"), "Retain before ten days")
+    clock = clock.addingTimeInterval(2 * 24 * 60 * 60)
+    logger.write("new-entry")
+    let after = try! String(contentsOf: directory.appendingPathComponent("SmartDiskGuard.log"), encoding: .utf8)
+    expect(after.contains("new-entry") && !after.contains("old-entry"), "Expire by creation, not last write")
+}
+
+test("log total byte limit includes active file and all backups") {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("SmartDiskGuardSizeTests-\(UUID().uuidString)")
+    defer { try! FileManager.default.removeItem(at: directory) }
+    let logger = DiagnosticLog(directory: directory, maxBytes: 220, maxTotalBytes: 512)
+    for index in 1...12 {
+        logger.write("entry-\(index) " + String(repeating: "x", count: 80))
+        let files = try! FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        let size = files.reduce(0) {
+            $0 + (try! FileManager.default.attributesOfItem(atPath: $1.path)[.size] as! NSNumber).intValue
+        }
+        expect(size <= 512, "Enforce total byte limit after every write")
+    }
+    let current = try! String(contentsOf: directory.appendingPathComponent("SmartDiskGuard.log"), encoding: .utf8)
+    expect(current.contains("entry-12"), "Newest records retained")
+}
+
+test("default log cap removes oversized legacy files and preserves unrelated files") {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("SmartDiskGuardDefaultSizeTests-\(UUID().uuidString)")
+    defer { try! FileManager.default.removeItem(at: directory) }
+    try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    for index in 0...9 {
+        let name = index == 0 ? "SmartDiskGuard.log" : "SmartDiskGuard.\(index).log"
+        try! Data(repeating: 120, count: 1_200_000).write(to: directory.appendingPathComponent(name))
+    }
+    let unrelated = directory.appendingPathComponent("unrelated.txt")
+    try! Data("keep".utf8).write(to: unrelated)
+    DiagnosticLog(directory: directory).write("new-record")
+    let files = try! FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        .filter { $0.pathExtension == "log" }
+    let size = files.reduce(0) {
+        $0 + (try! FileManager.default.attributesOfItem(atPath: $1.path)[.size] as! NSNumber).intValue
+    }
+    expect(size <= 10 * 1024 * 1024, "Exact default 10 MB total limit")
+    expect(FileManager.default.fileExists(atPath: unrelated.path), "Never delete unrelated files")
 }
 
 test("default retry plan allows exactly ten retries after the initial attempt") {
@@ -415,6 +492,35 @@ test("retry identity prevents unmounting a replacement volume") {
     )
     expect(!f.service.unmount("disk9s2", expectedIdentity: pinned).ok, "Replacement must be rejected")
     expect(f.unmountCommands.isEmpty, "Never unmount the replacement")
+}
+
+test("list-based metadata resolves APFS only when every backing store is external") {
+    let physical: [String: Any] = [
+        "AllDisksAndPartitions": [
+            ["OSInternal": false, "DeviceIdentifier": "disk9",
+             "Partitions": [["DeviceIdentifier": "disk9s2", "VolumeUUID": "store"]]]
+        ]
+    ]
+    for store in ["disk9s2", "disk0s2"] {
+        var calls: [[String]] = []
+        do {
+            let info = try SafeUnmount.ExternalDiskMetadata.read("disk12s1", command: { _, args in
+                calls.append(args)
+                if args == ["list", "-plist", "external", "physical"] { return plist(physical) }
+                expect(args == ["apfs", "list", "-plist"], "Never query bootability via info")
+                return plist(["Containers": [[
+                    "PhysicalStores": [["DeviceIdentifier": store]],
+                    "Volumes": [["DeviceIdentifier": "disk12s1", "APFSVolumeUUID": "volume",
+                                 "MountPoint": "/Volumes/Test"]]
+                ]]])
+            })
+            expect(store == "disk9s2", "Internal or image-backed store must fail")
+            expect(info["VolumeUUID"] as? String == "volume" && info["FilesystemType"] as? String == "apfs", "APFS metadata preserved")
+        } catch {
+            expect(store == "disk0s2", "Valid external store should resolve")
+        }
+        expect(calls.count == 2, "Bounded list lookups")
+    }
 }
 
 print("\(testCount) checks passed; no real disk was mounted or unmounted.")

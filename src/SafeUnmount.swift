@@ -14,10 +14,38 @@ final class DiagnosticLog {
     let directory: URL
     private let lock = NSLock()
     private let maxBytes: Int
+    private let maxTotalBytes: Int
+    private let maxAge: TimeInterval
+    private let now: () -> Date
 
-    init(directory: URL, maxBytes: Int = 1_048_576) {
+    init(
+        directory: URL, maxBytes: Int = 1_048_576,
+        maxTotalBytes: Int = 10_485_760, maxAge: TimeInterval = 10 * 24 * 60 * 60,
+        now: @escaping () -> Date = Date.init
+    ) {
         self.directory = directory
         self.maxBytes = maxBytes
+        self.maxTotalBytes = maxTotalBytes
+        self.maxAge = maxAge
+        self.now = now
+    }
+
+    private func logFile(_ index: Int) -> URL {
+        directory.appendingPathComponent(index == 0 ? "SmartDiskGuard.log" : "SmartDiskGuard.\(index).log")
+    }
+
+    private func existingFiles() throws -> [(url: URL, size: Int, created: Date)] {
+        let manager = FileManager.default
+        return try (0...9).compactMap { index in
+            let file = logFile(index)
+            guard manager.fileExists(atPath: file.path) else { return nil }
+            let attributes = try manager.attributesOfItem(atPath: file.path)
+            guard let size = attributes[.size] as? NSNumber,
+                  let created = attributes[.creationDate] as? Date else {
+                throw UnmountCheckError("Cannot read diagnostic log retention metadata")
+            }
+            return (file, size.intValue, created)
+        }
     }
 
     func write(_ message: String) {
@@ -27,17 +55,34 @@ final class DiagnosticLog {
             let manager = FileManager.default
             try manager.createDirectory(at: directory, withIntermediateDirectories: true,
                                         attributes: [.posixPermissions: 0o700])
-            let file = directory.appendingPathComponent("SmartDiskGuard.log")
+            let timestamp = now()
+            let line = "\(ISO8601DateFormatter().string(from: timestamp)) pid=\(ProcessInfo.processInfo.processIdentifier) \(message.prefix(4096))\n"
+            let data = Data(line.utf8)
+            guard data.count <= maxTotalBytes else {
+                throw UnmountCheckError("Diagnostic entry exceeds total log size limit")
+            }
+            // Use creation time, not last-write time: an actively appended file must still expire.
+            for entry in try existingFiles() where timestamp.timeIntervalSince(entry.created) >= maxAge {
+                try manager.removeItem(at: entry.url)
+            }
+            let file = logFile(0)
             if manager.fileExists(atPath: file.path) {
                 let size = (try manager.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.intValue ?? 0
-                if size >= maxBytes {
-                    for index in stride(from: 2, through: 0, by: -1) {
-                        let source = index == 0 ? file : directory.appendingPathComponent("SmartDiskGuard.\(index).log")
-                        let destination = directory.appendingPathComponent("SmartDiskGuard.\(index + 1).log")
+                if size > 0 && size + data.count > maxBytes {
+                    for index in stride(from: 8, through: 0, by: -1) {
+                        let source = logFile(index)
+                        let destination = logFile(index + 1)
                         if manager.fileExists(atPath: destination.path) { try manager.removeItem(at: destination) }
                         if manager.fileExists(atPath: source.path) { try manager.moveItem(at: source, to: destination) }
                     }
                 }
+            }
+            let files = try existingFiles()
+            var total = files.reduce(0) { $0 + $1.size }
+            // Higher archive numbers contain older records; delete them before the active file.
+            for entry in files.reversed() where total + data.count > maxTotalBytes {
+                try manager.removeItem(at: entry.url)
+                total -= entry.size
             }
             if !manager.fileExists(atPath: file.path) {
                 guard manager.createFile(atPath: file.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
@@ -47,10 +92,46 @@ final class DiagnosticLog {
             let handle = try FileHandle(forWritingTo: file)
             defer { handle.closeFile() }
             try handle.seekToEnd()
-            let line = "\(ISO8601DateFormatter().string(from: Date())) pid=\(ProcessInfo.processInfo.processIdentifier) \(message.prefix(4096))\n"
-            try handle.write(contentsOf: Data(line.utf8))
+            try handle.write(contentsOf: data)
         } catch {
             NSLog("SmartDiskGuard log write failed: %@", error.localizedDescription)
+        }
+    }
+}
+
+final class CommandProcesses {
+    static let shared = CommandProcesses()
+    private let lock = NSLock()
+    private var tasks: [Int32: Process] = [:]
+
+    func add(_ task: Process) {
+        lock.lock()
+        tasks[task.processIdentifier] = task
+        lock.unlock()
+    }
+
+    func remove(_ task: Process) {
+        lock.lock()
+        tasks.removeValue(forKey: task.processIdentifier)
+        lock.unlock()
+    }
+
+    func terminateOwnedCommands() {
+        lock.lock()
+        let running = Array(tasks.values)
+        lock.unlock()
+        for task in running where task.isRunning {
+            DiagnosticLog.shared.write("app exit terminating owned command child=\(task.processIdentifier)")
+            task.terminate()
+        }
+        let deadline = ProcessInfo.processInfo.systemUptime + 1
+        while running.contains(where: { $0.isRunning }), ProcessInfo.processInfo.systemUptime < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        for task in running where task.isRunning {
+            if kill(task.processIdentifier, SIGKILL) != 0, errno != ESRCH {
+                DiagnosticLog.shared.write("app exit kill failed child=\(task.processIdentifier) errno=\(errno)")
+            }
         }
     }
 }
@@ -72,7 +153,10 @@ func runCommand(_ launchPath: String, args: [String], timeout: TimeInterval = 30
         } catch { DiagnosticLog.shared.write("command output cleanup failed: \(error.localizedDescription)") }
     }
     let completed = DispatchSemaphore(value: 0)
-    task.terminationHandler = { _ in completed.signal() }
+    task.terminationHandler = {
+        CommandProcesses.shared.remove($0)
+        completed.signal()
+    }
     let started = ProcessInfo.processInfo.systemUptime
     let description = "\(URL(fileURLWithPath: launchPath).lastPathComponent) \(args.joined(separator: " "))"
     do {
@@ -85,6 +169,8 @@ func runCommand(_ launchPath: String, args: [String], timeout: TimeInterval = 30
         task.standardOutput = handle
         task.standardError = handle
         try task.run()
+        CommandProcesses.shared.add(task)
+        if !task.isRunning { CommandProcesses.shared.remove(task) }
         DiagnosticLog.shared.write("command started child=\(task.processIdentifier) timeout=\(timeout)s \(description)")
         if completed.wait(timeout: .now() + timeout) == .timedOut {
             if task.isRunning { task.terminate() }
@@ -211,6 +297,7 @@ struct SafeUnmount {
     var activity: (String) throws -> DiskActivity = DiskActivity.read
     var wait: (TimeInterval) -> Void = Thread.sleep(forTimeInterval:)
     var identity: (String, String) throws -> VolumeIdentity = VolumeIdentity.read
+    var metadata: (String) throws -> [String: Any] = { try ExternalDiskMetadata.read($0) }
 
     private struct Target: Equatable {
         let uuid: String
@@ -219,20 +306,64 @@ struct SafeUnmount {
     }
 
     private func diskInfo(_ id: String) throws -> [String: Any] {
-        let result = command("/usr/sbin/diskutil", ["info", "-plist", id])
-        guard result.ok else {
-            throw UnmountCheckError("无法检查 \(id)：\(result.output)")
-        }
-        guard let data = result.output.data(using: .utf8),
-              let info = try PropertyListSerialization.propertyList(
-                from: data, options: [], format: nil
-              ) as? [String: Any],
-              info["DeviceIdentifier"] as? String == id else {
+        let info = try metadata(id)
+        guard info["DeviceIdentifier"] as? String == id else {
             throw UnmountCheckError("\(id) 的磁盘信息无效")
         }
         return info
     }
 
+        enum ExternalDiskMetadata {
+            static func read(
+                _ id: String,
+                command: (String, [String]) -> CommandResult = { runCommand($0, args: $1) }
+            ) throws -> [String: Any] {
+                func query(_ args: [String]) throws -> [String: Any] {
+                    let result = command("/usr/sbin/diskutil", args)
+                    guard result.ok else { throw UnmountCheckError("无法读取磁盘列表：\(result.output)") }
+                    guard let value = try PropertyListSerialization.propertyList(
+                        from: Data(result.output.utf8), options: [], format: nil
+                    ) as? [String: Any] else { throw UnmountCheckError("磁盘列表格式无效") }
+                    return value
+                }
+                let listing = try query(["list", "-plist", "external", "physical"])
+                guard let disks = listing["AllDisksAndPartitions"] as? [[String: Any]] else {
+                    throw UnmountCheckError("外接物理磁盘列表不完整")
+                }
+                for disk in disks {
+                    guard disk["OSInternal"] as? Bool == false,
+                          let whole = disk["DeviceIdentifier"] as? String else { continue }
+                    for part in disk["Partitions"] as? [[String: Any]] ?? [] where part["DeviceIdentifier"] as? String == id {
+                        var info = part
+                        info["Internal"] = false
+                        info["WholeDisk"] = false
+                        info["ParentWholeDisk"] = whole
+                        return info
+                    }
+                }
+                // APFS volumes are synthesized devices; resolve their stores against physical disks only.
+                let apfs = try query(["apfs", "list", "-plist"])
+                for container in apfs["Containers"] as? [[String: Any]] ?? [] {
+                    let stores = container["PhysicalStores"] as? [[String: Any]] ?? []
+                    let storeIDs = stores.compactMap { $0["DeviceIdentifier"] as? String }
+                    let externalParts = Set(disks.filter { $0["OSInternal"] as? Bool == false }
+                        .flatMap { $0["Partitions"] as? [[String: Any]] ?? [] }
+                        .compactMap { $0["DeviceIdentifier"] as? String })
+                    guard !storeIDs.isEmpty, storeIDs.count == stores.count,
+                          storeIDs.allSatisfy({ externalParts.contains($0) }) else { continue }
+                    for volume in container["Volumes"] as? [[String: Any]] ?? [] where volume["DeviceIdentifier"] as? String == id {
+                        var info = volume
+                        info["Internal"] = false
+                        info["WholeDisk"] = false
+                        info["FilesystemType"] = "apfs"
+                        info["VolumeUUID"] = volume["APFSVolumeUUID"]
+                        info["APFSPhysicalStores"] = storeIDs.map { ["APFSPhysicalStore": $0] }
+                        return info
+                    }
+                }
+                throw UnmountCheckError("目标不在外接物理磁盘列表中，已跳过")
+            }
+        }
     private func target(_ id: String) throws -> Target {
         let info = try diskInfo(id)
         guard info["BusProtocol"] as? String != "Disk Image" else {
