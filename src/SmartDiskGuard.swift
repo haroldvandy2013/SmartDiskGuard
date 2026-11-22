@@ -374,7 +374,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         volumes.removeAll()
         diskPopup.removeAllItems()
 
-        let res = runCommand("/usr/sbin/diskutil", args: ["list", "-plist", "external"])
+        let res = runCommand("/usr/sbin/diskutil", args: ["list", "-plist", "external", "physical"])
         if res.ok, let data = res.output.data(using: .utf8),
            let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
            let allDisks = plist["AllDisksAndPartitions"] as? [[String: Any]] {

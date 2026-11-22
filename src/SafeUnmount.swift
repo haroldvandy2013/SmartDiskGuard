@@ -154,6 +154,9 @@ struct SafeUnmount {
 
     private func target(_ id: String) throws -> Target {
         let info = try diskInfo(id)
+        guard info["BusProtocol"] as? String != "Disk Image" else {
+            throw UnmountCheckError("磁盘映像（如应用安装 DMG）不属于外接物理硬盘，已跳过")
+        }
         guard info["Internal"] as? Bool == false,
               info["WholeDisk"] as? Bool == false,
               let uuid = info["VolumeUUID"] as? String, !uuid.isEmpty,
@@ -177,6 +180,9 @@ struct SafeUnmount {
         }
         let disks = try stores.map { store -> String in
             let storeInfo = store == id ? info : try diskInfo(store)
+            guard storeInfo["BusProtocol"] as? String != "Disk Image" else {
+                throw UnmountCheckError("卷宗位于磁盘映像中，已跳过卸载")
+            }
             guard storeInfo["Internal"] as? Bool == false,
                   let disk = storeInfo["ParentWholeDisk"] as? String, !disk.isEmpty else {
                 throw UnmountCheckError("无法确认 \(store) 对应的外接物理磁盘")

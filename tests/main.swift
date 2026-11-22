@@ -134,6 +134,13 @@ test("missing statistics fail closed") {
     expect(f.unmountCommands.isEmpty, "No unmount")
 }
 
+test("installer disk images are rejected before activity sampling") {
+    let f = Fixture()
+    f.info["BusProtocol"] = "Disk Image"
+    expect(!f.service.unmount("disk9s2").ok, "DMG must not be managed as a physical disk")
+    expect(f.sampledDisks.isEmpty && f.unmountCommands.isEmpty, "No sampling or unmount of image")
+}
+
 test("statistics disappearing during observation fail closed") {
     let f = Fixture()
     f.onWait = { f.activityFailure = true }
@@ -265,6 +272,13 @@ test("missing or internal APFS physical stores fail closed") {
     internalStore.stores["disk10s2"]?["Internal"] = true
     expect(!internalStore.service.unmount("disk12s1").ok, "Internal backing store must block")
     expect(internalStore.unmountCommands.isEmpty, "No unmount")
+}
+
+test("APFS backed by a disk image is excluded") {
+    let f = apfsFixture()
+    f.stores["disk9s2"]?["BusProtocol"] = "Disk Image"
+    expect(!f.service.unmount("disk12s1").ok, "APFS image must be excluded")
+    expect(f.sampledDisks.isEmpty && f.unmountCommands.isEmpty, "No unmount of APFS image")
 }
 
 test("real IOKit sampling is read-only") {
