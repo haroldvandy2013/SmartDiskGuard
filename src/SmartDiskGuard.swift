@@ -53,6 +53,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("SmartDiskGuard: missing application version in Info.plist")
         }
         window.title = "智能外接硬盘管家 — \(versionText)"
+        DiagnosticLog.shared.write("app started \(versionText)")
         window.isReleasedWhenClosed = false
 
         let contentView = NSView(frame: rect)
@@ -147,6 +148,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         saveButton.frame = NSRect(x: 245, y: 32, width: 70, height: 26)
         saveButton.bezelStyle = .rounded
         advancedView.addSubview(saveButton)
+        let logsButton = NSButton(title: "日志", target: self, action: #selector(openDiagnosticLogs))
+        logsButton.frame = NSRect(x: 322, y: 32, width: 70, height: 26)
+        logsButton.bezelStyle = .rounded
+        advancedView.addSubview(logsButton)
         let settingsHint = NSTextField(labelWithString: "首次尝试之外的重试次数；0 为不重试。保存后下轮生效。")
         settingsHint.font = NSFont.systemFont(ofSize: 10)
         settingsHint.frame = NSRect(x: 0, y: 4, width: 392, height: 20)
@@ -186,6 +191,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        DiagnosticLog.shared.write("app terminating operationInProgress=\(diskOperationInProgress)")
+        cancelAutomaticUnmount()
+    }
+
     @objc func checkboxChanged() {
         let isChecked = (autoUnmountCheckbox.state == .on)
         preferences.set(isChecked, forKey: "AutoUnmountOnLock")
@@ -194,21 +204,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func screenDidLock() {
+        DiagnosticLog.shared.write("screen locked")
         screenLocked = true
         automaticallyUnmount()
     }
 
     @objc func screenDidUnlock() {
+        DiagnosticLog.shared.write("screen unlocked")
         screenLocked = false
         if !displayAsleep { cancelAutomaticUnmount() }
     }
 
     @objc func screensDidSleep() {
+        DiagnosticLog.shared.write("displays asleep")
         displayAsleep = true
         automaticallyUnmount()
     }
 
     @objc func screensDidWake() {
+        DiagnosticLog.shared.write("displays awake")
         displayAsleep = false
         if !screenLocked { cancelAutomaticUnmount() }
     }
@@ -252,6 +266,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             retryCountField.stringValue = "\(retrySettings.retries)"
             retryIntervalField.stringValue = "\(retrySettings.interval)"
             logLabel.stringValue = "✅ 重试 \(retrySettings.retries) 次 / 间隔 \(retrySettings.interval) 秒，下轮生效"
+            DiagnosticLog.shared.write("retry settings saved retries=\(retrySettings.retries) interval=\(retrySettings.interval)s")
         } catch {
             let alert = NSAlert()
             alert.messageText = "重试设置无效"
@@ -265,6 +280,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         autoUnmountCheckbox.state == .on && (screenLocked || displayAsleep)
     }
 
+    @objc func openDiagnosticLogs() {
+        DiagnosticLog.shared.write("log folder requested")
+        if !NSWorkspace.shared.open(DiagnosticLog.shared.directory) {
+            logLabel.stringValue = "❌ 无法打开日志目录"
+            DiagnosticLog.shared.write("failed to open log directory")
+        }
+    }
+
     func cancelAutomaticUnmount() {
         automaticGeneration += 1
         retryTimer?.invalidate()
@@ -272,6 +295,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let hadPlan = retryPlan != nil
         retryPlan = nil
         if hadPlan { logLabel.stringValue = "⚪️ 已取消自动卸载重试" }
+        if hadPlan { DiagnosticLog.shared.write("automatic unmount cancelled generation=\(automaticGeneration)") }
     }
 
     func automaticallyUnmount() {
@@ -293,11 +317,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard plan.canRetry else {
             if !plan.pending.isEmpty {
                 logLabel.stringValue = "⚠️ 自动重试已用完（\(plan.settings.retries) 次），仍有 \(plan.pending.count) 个未卸载"
+                DiagnosticLog.shared.write("automatic retries exhausted count=\(plan.settings.retries) pending=\(plan.pending.count)")
             }
             retryPlan = nil
             return
         }
         let generation = automaticGeneration
+        DiagnosticLog.shared.write("retry scheduled generation=\(generation) retry=\(plan.retriesUsed + 1)/\(plan.settings.retries) interval=\(plan.settings.interval)s")
         logLabel.stringValue = "⏳ \(plan.settings.interval) 秒后重试 \(plan.retriesUsed + 1)/\(plan.settings.retries)"
         retryTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(plan.settings.interval), repeats: false) { [weak self] _ in
             guard let self = self else { return }
@@ -316,6 +342,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         logLabel.stringValue = "正在检查硬盘读写，请稍候..."
         let generation = automaticGeneration
         let service = makeSafeUnmount()
+        DiagnosticLog.shared.write("unmount batch started automatic=\(automatic) generation=\(generation) targets=\(targets.map { $0.volume.id })")
         DispatchQueue.global(qos: .utility).async {
             var unmountedCount = 0
             var failures: [String] = []
@@ -330,6 +357,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         generation == self.automaticGeneration && self.automaticUnmountAllowed
                     }
                 })
+                DiagnosticLog.shared.write("unmount result device=\(volume.id) success=\(result.ok)\(result.ok ? "" : " reason=\(result.output)")")
                 if result.ok {
                     unmountedCount += 1
                 } else {
@@ -345,6 +373,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self.diskOperationInProgress = false
                 self.mountButton.isEnabled = true
                 self.unmountButton.isEnabled = true
+                DiagnosticLog.shared.write("unmount batch finished success=\(count) failed=\(failedCount); buttons restored")
                 self.refreshDisks()
                 self.logLabel.stringValue = failedCount == 0
                     ? "💤 已安全卸载 \(count) 个外接卷宗"
@@ -375,6 +404,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         diskPopup.removeAllItems()
 
         let res = runCommand("/usr/sbin/diskutil", args: ["list", "-plist", "external", "physical"])
+        if !res.ok {
+            diskPopup.addItem(withTitle: "扫描失败")
+            diskPopup.isEnabled = false
+            statusLabel.stringValue = "❌ 无法扫描外接硬盘"
+            logLabel.stringValue = "❌ 扫描失败（详情见提示或日志）"
+            logLabel.toolTip = res.output
+            DiagnosticLog.shared.write("disk scan failed: \(res.output)")
+            return
+        }
         if res.ok, let data = res.output.data(using: .utf8),
            let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
            let allDisks = plist["AllDisksAndPartitions"] as? [[String: Any]] {
@@ -436,7 +474,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let v = volumes[idx]
         logLabel.stringValue = "正在挂载 \(v.name)..."
         var res = runCommand("/usr/sbin/diskutil", args: ["mount", v.id])
-        if !res.ok {
+        if !res.ok && !res.timedOut {
             res = runCommand("/usr/sbin/diskutil", args: ["mountDisk", v.id])
         }
         refreshDisks()

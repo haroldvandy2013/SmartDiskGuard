@@ -153,6 +153,19 @@ delegate.screensDidSleep()
 pumpUntil { !delegate.diskOperationInProgress }
 expect(simulatedUnmounts == 0 && delegate.retryTimer == nil, "Wake cancels an in-flight safety check")
 expect(delegate.mountButton.isEnabled && delegate.unmountButton.isEnabled, "Buttons restored after cancellation")
+delegate.retrySettings = UnmountRetrySettings(retries: 0, interval: 30)
+delegate.makeSafeUnmount = {
+    SafeUnmount(command: { _, _ in
+        runCommand("/bin/sleep", args: ["10"], timeout: 0.1)
+    })
+}
+delegate.screensDidSleep()
+expect(!delegate.mountButton.isEnabled && !delegate.unmountButton.isEnabled, "Buttons disabled during operation")
+pumpUntil { !delegate.diskOperationInProgress }
+expect(delegate.mountButton.isEnabled && delegate.unmountButton.isEnabled, "Timeout restores both buttons")
+expect(delegate.retryTimer == nil && delegate.retryPlan == nil, "Timed-out zero-retry batch stops")
+expect(delegate.logLabel.toolTip?.contains("未响应") == true, "Timeout reason remains visible")
+delegate.screensDidWake()
 delegate.window.close()
 print("PASS: Advanced layout, persistence, retry timing/count, failed-only retries, cancellation, and success")
 print("No real mount or unmount commands were executed.")

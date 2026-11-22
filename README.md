@@ -31,7 +31,11 @@
   - 纯 Swift + AppKit 编写，不依赖任何第三方库或运行时环境。
   - 内置 `make_icon.swift`，基于 Apple SF Symbols 动态渲染全尺寸 Retina 圆角渐变图标 (`.icns`)。
 - **🏷️ 运行版本可见**：
-  - 窗口标题及界面右上角常驻显示版本号（例如 `v0.3.1`），直接读取当前运行应用的 `Info.plist`，不受状态提示变化影响。
+  - 窗口标题及界面右上角常驻显示版本号（例如 `v0.3.2`），直接读取当前运行应用的 `Info.plist`，不受状态提示变化影响。
+- **📝 超时保护与本地诊断日志**：
+  - 每条磁盘命令默认最多等待 30 秒；超时后向该子进程发送终止信号，必要时结束该命令进程（不是强制卸载硬盘），并报告失败。卸载流程返回后恢复 Mount / Unmount 按钮；挂载超时不会立即执行备用挂载命令。
+  - 日志位于 `~/Library/Logs/SmartDiskGuard/SmartDiskGuard.log`，记录应用版本、锁屏 / 熄屏事件、命令 PID / 耗时 / 返回码 / 超时、重试及按钮恢复状态。Advanced 中点击 **日志** 可打开目录。
+  - 单个日志约 1 MB 后轮转，最多保留当前文件及 3 个备份。日志只保存在本地，不自动上传；可能含卷宗标识、名称及错误信息，分享前请检查内容。日志写入失败会报告到 macOS 系统日志。
 
 ---
 
@@ -81,7 +85,7 @@ chmod +x build.sh package_dmg.sh
 ./package_dmg.sh
 ```
 
-脚本会自动在 `dist/` 目录下生成 **`dist/SmartDiskGuard-v0.3.1-universal.dmg`**，内含应用本体、`Applications` 拖拽快捷方式以及首次打开解除 Gatekeeper 隔离的辅助脚本。发布其他版本时，可为构建和打包命令设置 `APP_VERSION`。
+脚本会自动在 `dist/` 目录下生成 **`dist/SmartDiskGuard-v0.3.2-universal.dmg`**，内含应用本体、`Applications` 拖拽快捷方式以及首次打开解除 Gatekeeper 隔离的辅助脚本。发布其他版本时，可为构建和打包命令设置 `APP_VERSION`。
 
 ### 3. 运行安全卸载回归检查
 

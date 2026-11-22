@@ -329,6 +329,44 @@ test("command runner drains output larger than the pipe buffer") {
     expect(result.ok && result.output.utf8.count == 100000, "Large output must not deadlock")
 }
 
+test("command timeout returns failure promptly and allows the next command") {
+    let start = ProcessInfo.processInfo.systemUptime
+    let result = runCommand("/bin/sleep", args: ["10"], timeout: 0.1)
+    expect(!result.ok && result.timedOut, "Timeout must be explicit failure")
+    expect(ProcessInfo.processInfo.systemUptime - start < 3, "No unlimited wait")
+    let next = runCommand("/usr/bin/printf", args: ["recovered"], timeout: 1)
+    expect(next.ok && !next.timedOut && next.output == "recovered", "Runner recovers after timeout")
+}
+
+test("timeout remains failure even when process ignores termination") {
+    let result = runCommand("/usr/bin/python3", args: [
+        "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready',flush=True); time.sleep(10)"
+    ], timeout: 0.5)
+    expect(!result.ok && result.timedOut, "Escalated timeout cannot report partial output as success")
+}
+
+test("command launch errors are explicit") {
+    let result = runCommand("/nonexistent-SmartDiskGuard-command", args: [], timeout: 1)
+    expect(!result.ok && !result.timedOut && !result.output.isEmpty, "Report launch failure")
+}
+
+test("diagnostic logs rotate and retain only three backups") {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("SmartDiskGuardLogsTests-\(UUID().uuidString)")
+    defer {
+        do { try FileManager.default.removeItem(at: directory) }
+        catch { fatalError("Cannot clean log test directory: \(error)") }
+    }
+    let logger = DiagnosticLog(directory: directory, maxBytes: 1)
+    for index in 1...6 { logger.write("test-entry-\(index)") }
+    do {
+        let files = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        expect(Set(files) == Set(["SmartDiskGuard.log", "SmartDiskGuard.1.log", "SmartDiskGuard.2.log", "SmartDiskGuard.3.log"]), "Bounded retained files")
+        let current = try String(contentsOf: directory.appendingPathComponent("SmartDiskGuard.log"), encoding: .utf8)
+        let oldest = try String(contentsOf: directory.appendingPathComponent("SmartDiskGuard.3.log"), encoding: .utf8)
+        expect(current.contains("test-entry-6") && oldest.contains("test-entry-3"), "Correct rotation order")
+    } catch { fatalError("Cannot inspect log rotation: \(error)") }
+}
+
 test("default retry plan allows exactly ten retries after the initial attempt") {
     let settings = UnmountRetrySettings.defaults
     expect(settings.retries == 10 && settings.interval == 30, "Exact default settings")

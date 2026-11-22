@@ -5,24 +5,105 @@ import Darwin
 struct CommandResult {
     let ok: Bool
     let output: String
+    var timedOut = false
 }
 
-func runCommand(_ launchPath: String, args: [String]) -> CommandResult {
+final class DiagnosticLog {
+    static let shared = DiagnosticLog(directory: FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/SmartDiskGuard", isDirectory: true))
+    let directory: URL
+    private let lock = NSLock()
+    private let maxBytes: Int
+
+    init(directory: URL, maxBytes: Int = 1_048_576) {
+        self.directory = directory
+        self.maxBytes = maxBytes
+    }
+
+    func write(_ message: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        do {
+            let manager = FileManager.default
+            try manager.createDirectory(at: directory, withIntermediateDirectories: true,
+                                        attributes: [.posixPermissions: 0o700])
+            let file = directory.appendingPathComponent("SmartDiskGuard.log")
+            if manager.fileExists(atPath: file.path) {
+                let size = (try manager.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.intValue ?? 0
+                if size >= maxBytes {
+                    for index in stride(from: 2, through: 0, by: -1) {
+                        let source = index == 0 ? file : directory.appendingPathComponent("SmartDiskGuard.\(index).log")
+                        let destination = directory.appendingPathComponent("SmartDiskGuard.\(index + 1).log")
+                        if manager.fileExists(atPath: destination.path) { try manager.removeItem(at: destination) }
+                        if manager.fileExists(atPath: source.path) { try manager.moveItem(at: source, to: destination) }
+                    }
+                }
+            }
+            if !manager.fileExists(atPath: file.path) {
+                guard manager.createFile(atPath: file.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
+                    throw UnmountCheckError("Cannot create diagnostic log")
+                }
+            }
+            let handle = try FileHandle(forWritingTo: file)
+            defer { handle.closeFile() }
+            try handle.seekToEnd()
+            let line = "\(ISO8601DateFormatter().string(from: Date())) pid=\(ProcessInfo.processInfo.processIdentifier) \(message.prefix(4096))\n"
+            try handle.write(contentsOf: Data(line.utf8))
+        } catch {
+            NSLog("SmartDiskGuard log write failed: %@", error.localizedDescription)
+        }
+    }
+}
+
+func runCommand(_ launchPath: String, args: [String], timeout: TimeInterval = 30) -> CommandResult {
+    guard timeout.isFinite, timeout > 0 else {
+        DiagnosticLog.shared.write("command rejected: invalid timeout")
+        return CommandResult(ok: false, output: "命令超时设置无效")
+    }
     let task = Process()
     task.executableURL = URL(fileURLWithPath: launchPath)
     task.arguments = args
-    let pipe = Pipe()
-    task.standardOutput = pipe
-    task.standardError = pipe
+    let outputFile = FileManager.default.temporaryDirectory.appendingPathComponent("SmartDiskGuard-command-\(UUID().uuidString)")
+    defer {
+        do {
+            if FileManager.default.fileExists(atPath: outputFile.path) {
+                try FileManager.default.removeItem(at: outputFile)
+            }
+        } catch { DiagnosticLog.shared.write("command output cleanup failed: \(error.localizedDescription)") }
+    }
+    let completed = DispatchSemaphore(value: 0)
+    task.terminationHandler = { _ in completed.signal() }
+    let started = ProcessInfo.processInfo.systemUptime
+    let description = "\(URL(fileURLWithPath: launchPath).lastPathComponent) \(args.joined(separator: " "))"
     do {
+        // A file avoids pipe-buffer deadlocks and lets timeout return even if a writer never closes stdout.
+        guard FileManager.default.createFile(atPath: outputFile.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
+            throw UnmountCheckError("无法创建命令输出文件")
+        }
+        let handle = try FileHandle(forWritingTo: outputFile)
+        defer { handle.closeFile() }
+        task.standardOutput = handle
+        task.standardError = handle
         try task.run()
-        // Drain before waiting so a full pipe cannot deadlock the child process.
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        task.waitUntilExit()
+        DiagnosticLog.shared.write("command started child=\(task.processIdentifier) timeout=\(timeout)s \(description)")
+        if completed.wait(timeout: .now() + timeout) == .timedOut {
+            if task.isRunning { task.terminate() }
+            if completed.wait(timeout: .now() + 1) == .timedOut {
+                if task.isRunning, kill(task.processIdentifier, SIGKILL) != 0, errno != ESRCH {
+                    DiagnosticLog.shared.write("command kill failed child=\(task.processIdentifier) errno=\(errno)")
+                }
+                _ = completed.wait(timeout: .now() + 1)
+            }
+            DiagnosticLog.shared.write("command timeout child=\(task.processIdentifier) stillRunning=\(task.isRunning) \(description)")
+            return CommandResult(ok: false, output: "命令超过 \(timeout.formatted()) 秒未响应，已取消等待；请检查硬盘连接后重试", timedOut: true)
+        }
+        let data = try Data(contentsOf: outputFile)
         let output = String(data: data, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        DiagnosticLog.shared.write("command completed child=\(task.processIdentifier) status=\(task.terminationStatus) elapsed=\(String(format: "%.2f", ProcessInfo.processInfo.systemUptime - started))s \(description)")
         return CommandResult(ok: task.terminationStatus == 0, output: output)
     } catch {
+        DiagnosticLog.shared.write("command failed \(description): \(error.localizedDescription)")
         return CommandResult(ok: false, output: error.localizedDescription)
     }
 }
